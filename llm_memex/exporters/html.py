@@ -20,11 +20,17 @@ _DB_GZIP_LEVEL = 6
 
 
 def _strip_fts5_and_vacuum(db_path: Path) -> None:
-    """Drop FTS5 virtual tables and VACUUM.
+    """Sanitize the exported DB copy: drop FTS5 tables, remove redaction-undo
+    plaintext, and VACUUM.
 
     sql.js (used by the HTML SPA) cannot query FTS5 — it's not compiled in.
     The shadow tables are ~50% of a typical DB, so dropping them before
     export roughly halves bundle size. The SPA falls back to LIKE queries.
+
+    The redact script stores the pre-redaction content in ``original_content``
+    enrichments so redaction is reversible. That undo copy holds exactly the
+    secrets the user asked to remove, so it must never travel into a published
+    bundle (treat any exported HTML as potentially public). It is deleted here.
 
     Sets ``PRAGMA journal_mode=DELETE`` on the copy so no -wal/-shm sidecar
     files are left next to the exported database when the process is
@@ -34,6 +40,10 @@ def _strip_fts5_and_vacuum(db_path: Path) -> None:
         conn.execute("PRAGMA journal_mode=DELETE")
         for fts in _FTS5_TABLES:
             conn.execute(f"DROP TABLE IF EXISTS {fts}")
+        try:
+            conn.execute("DELETE FROM enrichments WHERE type='original_content'")
+        except sqlite3.OperationalError:
+            pass  # no enrichments table (pre-v2 schema): nothing to strip
         conn.commit()
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute("VACUUM")

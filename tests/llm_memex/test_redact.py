@@ -846,3 +846,19 @@ class TestRedactDBIntegration:
         assert stored["message_id"] == "m1"
         assert stored["content"] == [{"type": "text", "text": "contains secret here"}]
         db.close()
+
+    def test_redact_scrubs_conversation_title(self, tmp_db_path):
+        """Redaction must scrub the conversation title, not just messages (REDACT-2).
+
+        The title is a denormalized field exported by every exporter, so a
+        secret left in it would leak even after message redaction."""
+        from llm_memex.scripts.redact import run
+        db = Database(tmp_db_path)
+        conv = _make_conv_with_text("a clean message", title="my secret key")
+        db.save_conversation(conv)
+        args = _make_args(words="secret", level="word", yes=True)
+        run(db, args, apply=True)
+        reloaded = db.load_conversation("c1")
+        assert "secret" not in (reloaded.title or "").lower()
+        assert "[REDACTED]" in reloaded.title
+        db.close()

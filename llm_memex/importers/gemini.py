@@ -20,7 +20,20 @@ def detect(path: str) -> bool:
             if any(k in data for k in ("conversations", "turns", "conversation_id")):
                 return True
         if isinstance(data, list) and data:
-            sample = str(data[0]).lower()
+            first = data[0]
+            # Do not claim other providers' exports: an OpenAI conversation dict
+            # carries "mapping" and an Anthropic one carries "chat_messages".
+            # Matching a "gemini"/"bard" substring anywhere in the stringified
+            # record is not a format signature (it collides with any chat that
+            # merely discusses those products), so structurally exclude them
+            # before falling back to the substring heuristic.
+            if isinstance(first, dict) and ("mapping" in first or "chat_messages" in first):
+                return False
+            if isinstance(first, dict) and any(
+                k in first for k in ("turns", "conversation_id", "parts")
+            ):
+                return True
+            sample = str(first).lower()
             if "gemini" in sample or "bard" in sample:
                 return True
         return False

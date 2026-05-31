@@ -36,6 +36,7 @@ class TestContentBlocks:
     def test_thinking_block(self):
         assert thinking_block("reasoning...") == {"type": "thinking", "text": "reasoning..."}
 
+import pytest
 from datetime import datetime
 from llm_memex.models import Message, Conversation
 
@@ -121,3 +122,43 @@ class TestConversation:
         assert len(paths[0]) == 1500
         assert paths[0][0].id == "m0"
         assert paths[0][-1].id == "m1499"
+
+    @pytest.mark.timeout(5)
+    def test_get_all_paths_terminates_on_cycle(self):
+        """A duplicate message id that re-parents into an ancestor must not hang get_all_paths."""
+        now = datetime.now()
+        conv = Conversation(id="c1", created_at=now, updated_at=now)
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")]))
+        conv.add_message(Message(id="m2", role="assistant", content=[text_block("b")], parent_id="m1"))
+        # Malformed re-add: same id m1 now claims m2 as parent, forming an m1->m2->m1 cycle.
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")], parent_id="m2"))
+        paths = conv.get_all_paths()  # must terminate, not loop forever
+        for p in paths:
+            ids = [m.id for m in p]
+            assert len(ids) == len(set(ids)), "a path must not repeat a message id"
+        seen = {m.id for p in paths for m in p}
+        assert {"m1", "m2"} <= seen
+
+    @pytest.mark.timeout(5)
+    def test_get_path_terminates_on_cycle(self):
+        """get_path must not loop forever when parent_id links form a cycle."""
+        now = datetime.now()
+        conv = Conversation(id="c1", created_at=now, updated_at=now)
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")]))
+        conv.add_message(Message(id="m2", role="assistant", content=[text_block("b")], parent_id="m1"))
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")], parent_id="m2"))
+        path = conv.get_path("m2")  # m2 -> m1 -> m2 -> ... must terminate
+        ids = [m.id for m in path]
+        assert len(ids) == len(set(ids)), "get_path must not repeat ids on a cycle"
+
+    def test_get_all_paths_includes_orphaned_messages(self):
+        """A message whose parent_id references a missing message must not be silently dropped."""
+        now = datetime.now()
+        conv = Conversation(id="c1", created_at=now, updated_at=now)
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")]))
+        conv.add_message(Message(id="orphan", role="assistant",
+                                 content=[text_block("b")], parent_id="ghost"))
+        paths = conv.get_all_paths()
+        all_ids = {m.id for p in paths for m in p}
+        assert "orphan" in all_ids, "orphan with a dangling parent_id should still appear"
+        assert "m1" in all_ids

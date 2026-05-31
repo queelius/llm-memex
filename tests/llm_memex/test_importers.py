@@ -338,6 +338,22 @@ class TestGeminiDetect:
     def test_nonexistent_file(self, tmp_path):
         assert gemini_detect(str(tmp_path / "nope.json")) is False
 
+    def test_openai_export_mentioning_gemini_not_detected(self, tmp_path):
+        """An OpenAI export (has 'mapping') that merely mentions gemini must not be claimed (IMP-1)."""
+        f = tmp_path / "openai.json"
+        f.write_text(json.dumps([
+            {"title": "gemini vs gpt-4", "mapping": {"root": {"id": "root", "message": None}}}
+        ]))
+        assert gemini_detect(str(f)) is False
+
+    def test_anthropic_export_mentioning_gemini_not_detected(self, tmp_path):
+        """An Anthropic export (has 'chat_messages') that mentions gemini must not be claimed (IMP-1)."""
+        f = tmp_path / "anthropic.json"
+        f.write_text(json.dumps([
+            {"name": "compare bard", "chat_messages": [{"text": "x"}]}
+        ]))
+        assert gemini_detect(str(f)) is False
+
 
 class TestGeminiImport:
     def test_turns_format(self, tmp_path):

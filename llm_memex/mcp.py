@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -14,6 +15,24 @@ from pydantic import Field
 from llm_memex.config import load_config, DatabaseRegistry
 from llm_memex.db import _fmt_dt
 from llm_memex.models import Message
+
+# Absolute filesystem paths, scrubbed from error strings before they cross the
+# MCP boundary so the agent cannot use them to map the host.
+_PATH_RE = re.compile(r"(?:/[\w.\-]+){2,}")
+_READONLY_HINTS = ("not authorized", "readonly database", "read-only", "query_only")
+
+
+def _sql_error_to_tool_error(e: Exception, readonly: bool) -> ToolError:
+    """Map a database error to a ToolError. A write blocked on a read-only
+    database (by the authorizer or query_only) becomes the standard
+    'writes disabled' message; every other message has host paths scrubbed."""
+    msg = str(e)
+    if readonly and any(h in msg.lower() for h in _READONLY_HINTS):
+        return ToolError(
+            "SQL writes are disabled for this database. "
+            "Set MEMEX_SQL_WRITE=true to enable."
+        )
+    return ToolError(_PATH_RE.sub("<path>", msg))
 
 
 @asynccontextmanager
@@ -140,7 +159,7 @@ def _register_tools(mcp: FastMCP):
         db: Annotated[str | None, Field(description="Target database name")] = None,
         ctx: Context = None,
     ) -> list[dict]:
-        """Run a SQL query against the database. Read-only by default (enforced by SQLite PRAGMA query_only).
+        """Run a SQL query against the database. Read-only by default (writes and ATTACH are blocked by a SQLite authorizer; set MEMEX_SQL_WRITE=true to allow writes).
 
 Use llm-memex://schema resource for full DDL. Common queries:
 
@@ -171,12 +190,8 @@ Starred/pinned (use IS NOT NULL for boolean timestamp columns):
         database = _get_db_from_ctx(mcp, ctx, db)
         try:
             return database.execute_sql(sql, tuple(params) if params else ())
-        except sqlite3.OperationalError as e:
-            if "attempt to write a readonly database" in str(e):
-                raise ToolError("SQL writes are disabled. Set MEMEX_SQL_WRITE=true to enable.")
-            raise ToolError(str(e))
         except Exception as e:
-            raise ToolError(str(e))
+            raise _sql_error_to_tool_error(e, database.readonly)
 
     @mcp.tool(annotations={"readOnlyHint": True})
     def get_conversation(
@@ -495,6 +510,11 @@ Examples:
     ) -> dict:
         """Add a message to the conversation tree. Returns created message and updated conversation metadata."""
         database = _get_db_from_ctx(mcp, ctx, db)
+        if database.readonly:
+            raise ToolError(
+                "SQL writes are disabled for this database. "
+                "Set MEMEX_SQL_WRITE=true to enable."
+            )
         msg_id = str(uuid.uuid4())
         msg = Message(
             id=msg_id, role=role, content=content,

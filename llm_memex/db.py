@@ -139,10 +139,17 @@ def _migrate_to_v2(conn):
 
 def _migrate_to_v3(conn):
     """Add parent_conversation_id column to conversations."""
-    conn.execute(
-        "ALTER TABLE conversations ADD COLUMN parent_conversation_id "
-        "TEXT REFERENCES conversations(id) ON DELETE SET NULL"
-    )
+    # Guarded against duplicates: a pre-existing (un-versioned) DB may already
+    # have this column from SCHEMA_SQL via _create_missing_tables, and the
+    # guard also makes the migration idempotent if it is ever re-run.
+    try:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN parent_conversation_id "
+            "TEXT REFERENCES conversations(id) ON DELETE SET NULL"
+        )
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e):
+            raise
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_conversations_parent "
         "ON conversations(parent_conversation_id) "
@@ -409,6 +416,25 @@ def _message_row(conv_id: str, msg: Message) -> tuple:
     )
 
 
+# SQLite authorizer action codes that create, drop, alter, or modify data.
+# Database._authorize denies these on read-only connections. An authorizer is a
+# stronger guard than PRAGMA query_only, which agent-supplied SQL can flip off.
+_WRITE_ACTIONS = frozenset(
+    getattr(sqlite3, _name) for _name in (
+        "SQLITE_INSERT", "SQLITE_UPDATE", "SQLITE_DELETE",
+        "SQLITE_CREATE_TABLE", "SQLITE_CREATE_TEMP_TABLE",
+        "SQLITE_CREATE_INDEX", "SQLITE_CREATE_TEMP_INDEX",
+        "SQLITE_CREATE_TRIGGER", "SQLITE_CREATE_TEMP_TRIGGER",
+        "SQLITE_CREATE_VIEW", "SQLITE_CREATE_TEMP_VIEW", "SQLITE_CREATE_VTABLE",
+        "SQLITE_DROP_TABLE", "SQLITE_DROP_TEMP_TABLE",
+        "SQLITE_DROP_INDEX", "SQLITE_DROP_TEMP_INDEX",
+        "SQLITE_DROP_TRIGGER", "SQLITE_DROP_TEMP_TRIGGER",
+        "SQLITE_DROP_VIEW", "SQLITE_DROP_TEMP_VIEW", "SQLITE_DROP_VTABLE",
+        "SQLITE_ALTER_TABLE",
+    ) if hasattr(sqlite3, _name)
+)
+
+
 class Database:
     def __init__(self, path: str, readonly: bool = False):
         if path == ":memory:":
@@ -427,6 +453,26 @@ class Database:
         self._ensure_schema()
         if readonly:
             self.conn.execute("PRAGMA query_only=ON")
+        # Install last, so schema creation/migration above is not blocked. The
+        # authorizer reads self.readonly live, so flipping it later (the MCP
+        # server does this) immediately tightens enforcement.
+        self.conn.set_authorizer(self._authorize)
+
+    def _authorize(self, action, arg1, arg2, db_name, source):
+        """SQLite authorizer. Denies ATTACH/DETACH on every connection (nothing
+        in llm-memex needs them, and they would let agent-supplied SQL reach
+        arbitrary database files). On a read-only connection it additionally
+        denies all writes and any attempt to turn query_only back off, so the
+        read-only contract cannot be lifted from within SQL."""
+        if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+            return sqlite3.SQLITE_DENY
+        if self.readonly:
+            if action in _WRITE_ACTIONS:
+                return sqlite3.SQLITE_DENY
+            if (action == sqlite3.SQLITE_PRAGMA and isinstance(arg1, str)
+                    and arg1.lower() == "query_only" and arg2 is not None):
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     def _ensure_schema(self):
         # Check if this is a pre-existing DB (has conversations but no schema_version)
@@ -487,6 +533,15 @@ class Database:
             "SELECT version FROM schema_version"
         ).fetchone()
         current = row["version"] if row else 1
+        if row is None:
+            # The schema_version table exists but holds no row (e.g. an init
+            # interrupted between table creation and the version INSERT). Seed
+            # one now so the UPDATE below actually persists the version;
+            # otherwise migrations silently re-run on every open and crash.
+            self.conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (current,)
+            )
+            self.conn.commit()
         while current < SCHEMA_VERSION:
             migrate_fn = MIGRATIONS.get(current)
             if migrate_fn is None:
@@ -576,12 +631,27 @@ class Database:
     def save_conversation(self, conv: Conversation) -> None:
         c = self.conn.cursor()
         try:
+            # Upsert the row in place. We deliberately avoid INSERT OR REPLACE:
+            # REPLACE deletes the existing row first, which fires ON DELETE SET
+            # NULL on notes.conversation_id (detaching a user's marginalia from a
+            # conversation that still exists) and on child conversations'
+            # parent_conversation_id. ON CONFLICT DO UPDATE mutates in place, so
+            # those foreign keys stay intact.
             c.execute(
-                "INSERT OR REPLACE INTO conversations "
+                "INSERT INTO conversations "
                 "(id,title,source,model,summary,message_count,"
                 "created_at,updated_at,starred_at,pinned_at,archived_at,"
                 "parent_conversation_id,sensitive,metadata) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  title=excluded.title, source=excluded.source,"
+                "  model=excluded.model, summary=excluded.summary,"
+                "  message_count=excluded.message_count,"
+                "  created_at=excluded.created_at, updated_at=excluded.updated_at,"
+                "  starred_at=excluded.starred_at, pinned_at=excluded.pinned_at,"
+                "  archived_at=excluded.archived_at,"
+                "  parent_conversation_id=excluded.parent_conversation_id,"
+                "  sensitive=excluded.sensitive, metadata=excluded.metadata",
                 (
                     conv.id, conv.title, conv.source, conv.model, conv.summary,
                     conv.message_count, _fmt_dt(conv.created_at),
@@ -591,8 +661,13 @@ class Database:
                     int(conv.sensitive), json.dumps(conv.metadata),
                 ),
             )
-            # CASCADE handles messages and tags on REPLACE.
-            # FTS is not covered by CASCADE, so we must clean it explicitly.
+            # REPLACE used to CASCADE-clear child rows; replicate that explicitly
+            # for everything EXCEPT notes (which must stay attached). messages_fts
+            # is not FK-backed, so it was always cleaned by hand.
+            c.execute("DELETE FROM messages WHERE conversation_id=?", (conv.id,))
+            c.execute("DELETE FROM tags WHERE conversation_id=?", (conv.id,))
+            c.execute("DELETE FROM enrichments WHERE conversation_id=?", (conv.id,))
+            c.execute("DELETE FROM provenance WHERE conversation_id=?", (conv.id,))
             c.execute(
                 "DELETE FROM messages_fts WHERE conversation_id=?", (conv.id,)
             )

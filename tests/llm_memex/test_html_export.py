@@ -563,6 +563,32 @@ class TestXssSafety:
         chunk = html[start:start + 1200]
         assert "SELECT target_kind, conversation_id, message_id FROM notes WHERE id = ?" in chunk
 
+    def test_message_div_id_uses_escattr(self):
+        """data-msg-id must use the quote-safe escAttr, not esc (HTML-2)."""
+        html = get_template()
+        assert "escAttr(msg.id)" in html
+        assert "esc(msg.id)" not in html
+
+    def test_note_edit_delete_are_event_delegated(self):
+        """Note edit/delete buttons must not interpolate the note id into an inline
+        onclick handler; they use data-action + delegation like add-note (HTML-1)."""
+        html = get_template()
+        assert 'onclick="editNote(' not in html
+        assert 'onclick="deleteNoteUI(' not in html
+        assert 'data-action="edit-note"' in html
+        assert 'data-action="delete-note"' in html
+
+    def test_db_param_rejects_cross_origin(self):
+        """?db= must only accept same-origin relative paths, not arbitrary URLs (HTML-4)."""
+        html = get_template()
+        assert 'dbParam.slice(0, 2) !== "//"' in html
+
+    def test_external_links_have_noopener(self):
+        """target=_blank links must carry rel=noopener noreferrer (HTML-5)."""
+        html = get_template()
+        assert 'rel="noopener noreferrer"' in html
+        assert 'target="_blank">' not in html
+
 
 class TestSpaArkivExport:
     """The SPA can export its current state as arkiv .jsonl.gz for round-tripping
@@ -1017,6 +1043,38 @@ class TestHtmlExporter:
         export([_make_conv()], str(out_dir), db_path=db_path, compress_db=False)
         assert (out_dir / "conversations.db").exists()
         assert not (out_dir / "conversations.db.gz").exists()
+
+    def test_export_strips_original_content_enrichments(self, tmp_path):
+        """Reversible-redaction plaintext must not ship in the published bundle (REDACT-1b)."""
+        import json as _json
+        import sqlite3 as _sqlite3
+        from llm_memex.db import Database
+        from llm_memex.exporters.html import export
+
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        with Database(str(db_dir)) as db:
+            db.save_conversation(_make_conv())
+            db.save_enrichment(
+                "c1", "original_content",
+                _json.dumps({"message_id": "m1",
+                             "content": [{"type": "text", "text": "sk-SUPER-SECRET-KEY"}]}),
+                "redact",
+            )
+
+        out_dir = tmp_path / "site"
+        db_path = str(db_dir / "conversations.db")
+        export([_make_conv()], str(out_dir), db_path=db_path, compress_db=False)
+
+        conn = _sqlite3.connect(str(out_dir / "conversations.db"))
+        n = conn.execute(
+            "SELECT COUNT(*) FROM enrichments WHERE type='original_content'"
+        ).fetchone()[0]
+        leaked = conn.execute(
+            "SELECT COUNT(*) FROM enrichments WHERE value LIKE '%SUPER-SECRET%'"
+        ).fetchone()[0]
+        conn.close()
+        assert n == 0 and leaked == 0, "redaction-undo plaintext leaked into the export"
 
     def test_export_copies_assets(self, tmp_path):
         from llm_memex.db import Database

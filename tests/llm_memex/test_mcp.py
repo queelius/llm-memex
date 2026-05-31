@@ -592,3 +592,54 @@ class TestBranchingConversation:
         assert msgs_b[1]["id"] == "m2b"
 
 
+class TestSqlSecurity:
+    def test_readonly_cannot_be_bypassed_via_pragma(self, db):
+        """Agent SQL must not flip query_only off and then write (MCP-1)."""
+        server = create_server(db=db, sql_write=False)
+        fn = _get_tool_fn(server, "execute_sql")
+        try:
+            fn(sql="PRAGMA query_only=OFF")  # denial is fine; success must not unlock writes
+        except Exception:
+            pass
+        with pytest.raises(Exception):
+            fn(sql="UPDATE conversations SET title='HACKED' WHERE id='c1'")
+        rows = db.execute_sql("SELECT title FROM conversations WHERE id='c1'")
+        assert rows[0]["title"] == "Test", "readonly bypass mutated the database"
+
+    def test_attach_database_is_denied(self, db, tmp_path):
+        """ATTACH must be denied so agent SQL cannot reach other database files (MCP-2)."""
+        import sqlite3
+        other = tmp_path / "secret.db"
+        oc = sqlite3.connect(str(other))
+        oc.execute("CREATE TABLE s(v)")
+        oc.execute("INSERT INTO s VALUES('SECRET')")
+        oc.commit()
+        oc.close()
+        server = create_server(db=db, sql_write=False)
+        fn = _get_tool_fn(server, "execute_sql")
+        with pytest.raises(Exception):
+            fn(sql=f"ATTACH DATABASE '{other}' AS x")
+
+    def test_attach_denied_even_when_writable(self, db, tmp_path):
+        """ATTACH is denied even on a writable server (no llm-memex query needs it)."""
+        import sqlite3
+        other = tmp_path / "secret.db"
+        oc = sqlite3.connect(str(other))
+        oc.execute("CREATE TABLE s(v)")
+        oc.commit()
+        oc.close()
+        server = create_server(db=db, sql_write=True)
+        fn = _get_tool_fn(server, "execute_sql")
+        with pytest.raises(Exception):
+            fn(sql=f"ATTACH DATABASE '{other}' AS x")
+
+    def test_append_message_denied_on_readonly(self, db):
+        """append_message must refuse cleanly on a readonly DB, like the other write tools (MCP-4)."""
+        from fastmcp.exceptions import ToolError
+        server = create_server(db=db, sql_write=False)
+        fn = _get_tool_fn(server, "append_message")
+        with pytest.raises(ToolError):
+            fn(conversation_id="c1", role="user",
+               content=[{"type": "text", "text": "x"}])
+
+

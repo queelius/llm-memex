@@ -488,11 +488,12 @@ class TestFTSInjection:
 
 
 class TestReadonlyMode:
-    """Tests for PRAGMA query_only enforcement (issue #2)."""
+    """Tests for read-only enforcement (issue #2). Writes are blocked by a
+    SQLite authorizer (stronger than the flippable query_only PRAGMA)."""
 
     def test_readonly_blocks_insert(self, tmp_db_path):
         db = Database(tmp_db_path, readonly=True)
-        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             db.execute_sql("INSERT INTO conversations (id, message_count, created_at, updated_at, sensitive) VALUES ('x', 0, '2024-01-01', '2024-01-01', 0)")
 
     def test_readonly_allows_select(self, tmp_db_path):
@@ -507,12 +508,12 @@ class TestReadonlyMode:
 
     def test_readonly_blocks_delete(self, tmp_db_path):
         db = Database(tmp_db_path, readonly=True)
-        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             db.execute_sql("DELETE FROM conversations")
 
     def test_readonly_blocks_drop(self, tmp_db_path):
         db = Database(tmp_db_path, readonly=True)
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             db.execute_sql("DROP TABLE IF EXISTS conversations")
 
 
@@ -1107,3 +1108,35 @@ class TestDeleteConversation:
         db = Database(tmp_db_path, readonly=True)
         with pytest.raises(Exception):
             db.delete_conversation("c1")
+
+
+class TestReimportIntegrity:
+    def test_reimport_keeps_notes_attached(self, tmp_db_path):
+        """Re-saving an existing conversation must not orphan its notes (DB-1)."""
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        note_id = db.add_note(conversation_id="c1", text="my marginalia")
+        # Re-import an updated export of the same conversation (gains a message).
+        conv = _make_conv()
+        conv.add_message(Message(id="m3", role="user",
+                                 content=[text_block("more")], parent_id="m2"))
+        db.save_conversation(conv)
+        row = db.conn.execute(
+            "SELECT conversation_id FROM notes WHERE id=?", (note_id,)
+        ).fetchone()
+        db.close()
+        assert row is not None and row["conversation_id"] == "c1"
+
+    def test_reopen_with_empty_schema_version(self, tmp_db_path):
+        """A schema_version left empty (interrupted init) must not crash reopen (DB-2)."""
+        from llm_memex.db import SCHEMA_VERSION
+        db = Database(tmp_db_path)
+        db.close()
+        raw = sqlite3.connect(str(Path(tmp_db_path) / "conversations.db"))
+        raw.execute("DELETE FROM schema_version")
+        raw.commit()
+        raw.close()
+        db2 = Database(tmp_db_path)  # previously raised OperationalError: duplicate column
+        row = db2.conn.execute("SELECT version FROM schema_version").fetchone()
+        db2.close()
+        assert row is not None and row["version"] == SCHEMA_VERSION

@@ -195,6 +195,10 @@ def run(db, args, apply=False):
         interactive_stats = interactive_review(pending, db, args.level)
         stats.update(interactive_stats)
 
+    # Scrub the denormalized title/summary fields too (they are exported by
+    # every exporter), independent of which messages matched.
+    stats["fields_redacted"] = _redact_conversation_fields(db, matchers)
+
     return stats
 
 
@@ -279,6 +283,53 @@ def redact_word_level(content, matches):
 def redact_message_level():
     """Return replacement content for a fully redacted message."""
     return [{"type": "text", "text": "[REDACTED]"}]
+
+
+def redact_text(text, matchers):
+    """Replace every matcher hit in a plain string with [REDACTED].
+
+    Returns (new_text, changed). Overlapping spans are merged and replaced
+    right-to-left so offsets stay valid.
+    """
+    if not text:
+        return text, False
+    spans = []
+    for regex, _ in matchers:
+        spans.extend((m.start(), m.end()) for m in regex.finditer(text))
+    if not spans:
+        return text, False
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
+        text = text[:start] + "[REDACTED]" + text[end:]
+    return text, True
+
+
+def _redact_conversation_fields(db, matchers):
+    """Scrub matcher hits from every conversation's title and summary.
+
+    These denormalized fields are exported by every exporter (markdown, json,
+    arkiv, and the HTML conversation list), so a secret left in a title or
+    summary would leak even after message-level redaction. Returns the count
+    of conversations updated.
+    """
+    rows = db.execute_sql("SELECT id, title, summary FROM conversations")
+    updated = 0
+    for row in rows:
+        new_title, t_changed = redact_text(row["title"], matchers)
+        new_summary, s_changed = redact_text(row["summary"], matchers)
+        if t_changed or s_changed:
+            db.execute_sql(
+                "UPDATE conversations SET title=?, summary=? WHERE id=?",
+                (new_title, new_summary, row["id"]),
+            )
+            updated += 1
+    return updated
 
 
 def _apply_single(db, result, level):

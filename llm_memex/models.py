@@ -124,22 +124,40 @@ class Conversation:
     def get_children(self, message_id: Optional[str]) -> List[Message]:
         return [self.messages[cid] for cid in self._children.get(message_id, []) if cid in self.messages]
 
+    def _effective_roots(self) -> List[str]:
+        """Root ids for traversal: the real roots, plus any message whose parent_id
+        dangles (references a message not present), so orphans are never silently
+        dropped from paths."""
+        roots = list(self.root_ids)
+        seen = set(roots)
+        for mid, msg in self.messages.items():
+            if (msg.parent_id is not None and msg.parent_id not in self.messages
+                    and mid not in seen):
+                roots.append(mid)
+                seen.add(mid)
+        return roots
+
     def get_all_paths(self) -> List[List[Message]]:
-        """Get all root-to-leaf paths. Uses iterative DFS to avoid recursion limits."""
+        """Get all root-to-leaf paths. Uses iterative DFS to avoid recursion limits.
+        A per-path visited set breaks cycles (a malformed import can repeat a message
+        id and re-parent it into an ancestor) so traversal always terminates."""
         paths: List[List[Message]] = []
-        # Stack entries: (message_id, path_so_far)
-        stack: List[tuple[str, List[Message]]] = [
-            (rid, []) for rid in reversed(self.root_ids)
+        # Stack entries: (message_id, path_so_far, ids_on_path)
+        stack: List[tuple[str, List[Message], frozenset]] = [
+            (rid, [], frozenset()) for rid in reversed(self._effective_roots())
         ]
         while stack:
-            msg_id, current = stack.pop()
+            msg_id, current, on_path = stack.pop()
+            if msg_id not in self.messages:
+                continue
             path = current + [self.messages[msg_id]]
-            children = self._children.get(msg_id, [])
+            on_path = on_path | {msg_id}
+            children = [c for c in self._children.get(msg_id, []) if c not in on_path]
             if not children:
                 paths.append(path)
             else:
                 for cid in reversed(children):
-                    stack.append((cid, path))
+                    stack.append((cid, path, on_path))
         return paths
 
     def get_path(self, leaf_id: str) -> Optional[List[Message]]:
@@ -147,9 +165,11 @@ class Conversation:
             return None
         path = []
         current = leaf_id
-        while current is not None:
+        seen: set[str] = set()
+        while current is not None and current not in seen:
             msg = self.messages.get(current)
             if msg is None: break
+            seen.add(current)
             path.append(msg)
             current = msg.parent_id
         path.reverse()
