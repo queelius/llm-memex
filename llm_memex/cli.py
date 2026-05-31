@@ -150,6 +150,15 @@ def _list_formats(formats, label):
     print()
 
 
+def _print_import_result(imported, unchanged, db_path):
+    """Print the 'Imported N conversation(s) [(M unchanged)] into <db>' line."""
+    parts = [f"Imported {imported} conversation(s)"]
+    if unchanged:
+        parts.append(f"({unchanged} unchanged)")
+    parts.append(f"into {db_path}")
+    print(" ".join(parts))
+
+
 def _cmd_import(args):
     import logging
     logging.basicConfig(
@@ -181,11 +190,7 @@ def _cmd_import(args):
             # An importer claimed the directory
             with Database(db_path) as db:
                 n_imp, n_unch = _save_convs(convs, file_path, args, db)
-                parts = [f"Imported {n_imp} conversation(s)"]
-                if n_unch:
-                    parts.append(f"({n_unch} unchanged)")
-                parts.append(f"into {db_path}")
-                print(" ".join(parts))
+                _print_import_result(n_imp, n_unch, db_path)
         elif args.recursive:
             # Fallback: walk directory, try each file
             with Database(db_path) as db:
@@ -216,11 +221,7 @@ def _cmd_import(args):
     else:
         with Database(db_path) as db:
             n_imp, n_unch = _import_one(file_path, args, db, exit_on_miss=True)
-            parts = [f"Imported {n_imp} conversation(s)"]
-            if n_unch:
-                parts.append(f"({n_unch} unchanged)")
-            parts.append(f"into {db_path}")
-            print(" ".join(parts))
+            _print_import_result(n_imp, n_unch, db_path)
 
 
 def _materialize_arkiv_notes(conv, db):
@@ -395,6 +396,23 @@ def _discover_exporters():
     )
 
 
+def _run_import_path(module, file_path, exit_on_fail):
+    """Call a module's import_path, converting failures to exit (or None).
+
+    On success returns the imported conversations. On exception, prints an
+    error and exits when exit_on_fail, otherwise prints a warning and returns
+    None.
+    """
+    try:
+        return module.import_path(file_path)
+    except Exception as e:
+        if exit_on_fail:
+            print(f"Error: failed to import {file_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Warning: failed to import {file_path}: {e}", file=sys.stderr)
+        return None
+
+
 def _auto_import(file_path, format_name=None, exit_on_fail=True):
     """Auto-detect importer and import path (file or directory).
 
@@ -407,14 +425,7 @@ def _auto_import(file_path, format_name=None, exit_on_fail=True):
                   f"Available: {', '.join(sorted(importers))}",
                   file=sys.stderr)
             sys.exit(1)
-        try:
-            return importers[format_name]["module"].import_path(file_path)
-        except Exception as e:
-            if exit_on_fail:
-                print(f"Error: failed to import {file_path}: {e}", file=sys.stderr)
-                sys.exit(1)
-            print(f"Warning: failed to import {file_path}: {e}", file=sys.stderr)
-            return None
+        return _run_import_path(importers[format_name]["module"], file_path, exit_on_fail)
     # Preferred order: claude_code_full wins over claude_code when both
     # detect (both share the same detect function, so otherwise the
     # alphabetically-earlier skeleton importer would always win).
@@ -427,14 +438,7 @@ def _auto_import(file_path, format_name=None, exit_on_fail=True):
         if info is None:
             continue
         if info["module"].detect(file_path):
-            try:
-                return info["module"].import_path(file_path)
-            except Exception as e:
-                if exit_on_fail:
-                    print(f"Error: failed to import {file_path}: {e}", file=sys.stderr)
-                    sys.exit(1)
-                print(f"Warning: failed to import {file_path}: {e}", file=sys.stderr)
-                return None
+            return _run_import_path(info["module"], file_path, exit_on_fail)
     if exit_on_fail:
         print(f"Error: no importer found for {file_path}", file=sys.stderr)
         sys.exit(1)

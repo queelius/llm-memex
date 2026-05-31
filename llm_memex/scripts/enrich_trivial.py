@@ -161,6 +161,6 @@ def run(db, args, apply=False):
     print(f"  skipped:  {stats['skipped']} (already enriched)")
 
     if not apply and (stats["trivial"] + stats["brief"] > 0):
-        print(f"\nRe-run with --apply to write enrichments.")
+        print("\nRe-run with --apply to write enrichments.")
 
     return stats

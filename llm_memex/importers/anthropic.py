@@ -136,17 +136,18 @@ def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
                     blocks.append(text_block(part.get("text", "")))
                 elif ptype == "image":
                     source = part.get("source", {})
-                    if isinstance(source, dict) and source.get("type") == "base64":
-                        blocks.append(
-                            media_block(
-                                source.get("media_type", "image/png"),
-                                data=source.get("data"),
+                    if isinstance(source, dict):
+                        if source.get("type") == "base64":
+                            blocks.append(
+                                media_block(
+                                    source.get("media_type", "image/png"),
+                                    data=source.get("data"),
+                                )
                             )
-                        )
-                    elif isinstance(source, dict) and "url" in source:
-                        blocks.append(
-                            media_block("image/png", url=source["url"])
-                        )
+                        elif "url" in source:
+                            blocks.append(
+                                media_block("image/png", url=source["url"])
+                            )
                 elif ptype == "tool_use":
                     blocks.append(
                         tool_use_block(

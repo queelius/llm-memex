@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
 
-from llm_memex.models import Conversation
+from llm_memex.models import Conversation, Message
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,46 @@ def extract_session_metadata(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "last_ts": last_ts,
         "model": model,
     }
+
+
+def build_conversation(
+    messages: List[Message],
+    meta: Dict[str, Any],
+    path: str,
+    source_type: str,
+    importer_mode: str,
+) -> Conversation:
+    """Assemble a Conversation from extracted messages and session metadata.
+
+    Shared by both Claude Code importers. The only per-importer differences are
+    source_type (provenance) and importer_mode (metadata); the conversation
+    fields, title-from-slug rule, and provenance shape are identical.
+    """
+    session_id = meta["session_id"]
+    title = slug_to_title(meta["slug"]) if meta["slug"] else "Untitled Session"
+
+    now = datetime.now(timezone.utc)
+    conv = Conversation(
+        id=session_id,
+        title=title,
+        source="claude_code",
+        model=meta["model"],
+        created_at=parse_iso(meta["first_ts"]) if meta["first_ts"] else now,
+        updated_at=parse_iso(meta["last_ts"]) if meta["last_ts"] else now,
+        tags=["claude-code"],
+    )
+
+    for msg in messages:
+        conv.add_message(msg)
+
+    conv.metadata["_provenance"] = {
+        "source_type": source_type,
+        "source_file": path,
+        "source_id": session_id,
+    }
+    conv.metadata["importer_mode"] = importer_mode
+
+    return conv
 
 
 def import_directory(

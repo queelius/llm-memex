@@ -396,6 +396,19 @@ def _decode_cursor(cursor: str) -> tuple[str, str]:
     return d["u"], d["id"]
 
 
+def _message_row(conv_id: str, msg: Message) -> tuple:
+    """Build the column-ordered value tuple for an INSERT into messages.
+
+    Column order: conversation_id, id, role, parent_id, model, created_at,
+    sensitive, content, metadata.
+    """
+    return (
+        conv_id, msg.id, msg.role, msg.parent_id, msg.model,
+        _fmt_dt(msg.created_at), int(msg.sensitive),
+        json.dumps(msg.content), json.dumps(msg.metadata),
+    )
+
+
 class Database:
     def __init__(self, path: str, readonly: bool = False):
         if path == ":memory:":
@@ -588,11 +601,7 @@ class Database:
                     "INSERT INTO messages "
                     "(conversation_id,id,role,parent_id,model,created_at,"
                     "sensitive,content,metadata) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (
-                        conv.id, msg.id, msg.role, msg.parent_id, msg.model,
-                        _fmt_dt(msg.created_at), int(msg.sensitive),
-                        json.dumps(msg.content), json.dumps(msg.metadata),
-                    ),
+                    _message_row(conv.id, msg),
                 )
                 text = msg.get_text()
                 if text:
@@ -659,11 +668,7 @@ class Database:
                     "INSERT OR IGNORE INTO messages "
                     "(conversation_id,id,role,parent_id,model,created_at,"
                     "sensitive,content,metadata) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (
-                        conv.id, msg.id, msg.role, msg.parent_id, msg.model,
-                        _fmt_dt(msg.created_at), int(msg.sensitive),
-                        json.dumps(msg.content), json.dumps(msg.metadata),
-                    ),
+                    _message_row(conv.id, msg),
                 )
                 if cur.rowcount:
                     stats["added_messages"] += 1
@@ -849,18 +854,15 @@ class Database:
         if title:
             conds.append("c.title LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(title)}%")
-        if starred is True:
-            conds.append("c.starred_at IS NOT NULL")
-        elif starred is False:
-            conds.append("c.starred_at IS NULL")
-        if pinned is True:
-            conds.append("c.pinned_at IS NOT NULL")
-        elif pinned is False:
-            conds.append("c.pinned_at IS NULL")
-        if archived is True:
-            conds.append("c.archived_at IS NOT NULL")
-        elif archived is False:
-            conds.append("c.archived_at IS NULL")
+        for flag, column in (
+            (starred, "c.starred_at"),
+            (pinned, "c.pinned_at"),
+            (archived, "c.archived_at"),
+        ):
+            if flag is True:
+                conds.append(f"{column} IS NOT NULL")
+            elif flag is False:
+                conds.append(f"{column} IS NULL")
         if sensitive is True:
             conds.append("c.sensitive=1")
         elif sensitive is False:
@@ -964,7 +966,7 @@ class Database:
                 return []
             join_clause = (
                 "INNER JOIN messages_fts f "
-                "ON m.conversation_id=f.conversation_id AND m.id=f.message_id"
+                "ON m.conversation_id=f.conversation_id AND m.id=f.message_id "
             )
             conds.append("f.messages_fts MATCH ?")
             params.append(fts_q)
@@ -995,7 +997,7 @@ class Database:
                 f" m.content, m.parent_id, m.model, m.created_at,"
                 f" c.title as conversation_title "
                 f"FROM messages m "
-                f"{join_clause + ' ' if join_clause else ''}"
+                f"{join_clause}"
                 f"INNER JOIN conversations c ON m.conversation_id=c.id "
                 f"WHERE {where} "
                 f"LIMIT ?",

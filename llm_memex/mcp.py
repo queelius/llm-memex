@@ -89,9 +89,8 @@ def _get_db_from_ctx(mcp, ctx, db_name=None):
 def _extract_text(content) -> str:
     """Extract text from a message content field (JSON string or list of blocks)."""
     if isinstance(content, str):
-        import json as _json
         try:
-            content = _json.loads(content)
+            content = json.loads(content)
         except (ValueError, TypeError):
             return content
     if isinstance(content, list):

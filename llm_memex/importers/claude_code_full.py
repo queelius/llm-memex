@@ -8,7 +8,6 @@ blocks: tool_use, tool_result, and thinking blocks are kept alongside text. This
 enables auditing tool usage, replaying sessions, and analyzing thinking patterns.
 """
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,9 +20,9 @@ from llm_memex.models import (
 from llm_memex.importers._claude_code_common import (
     detect,  # re-exported as public API
     parse_iso as _parse_iso,
-    slug_to_title as _slug_to_title,
     parse_records,
     extract_session_metadata,
+    build_conversation,
     import_directory,
     find_subagent_files,
     extract_agent_id,
@@ -172,29 +171,11 @@ def _import_single(path: str, ignore_sidechain: bool = False) -> List[Conversati
     if not messages:
         return []
 
-    title = _slug_to_title(meta["slug"]) if meta["slug"] else "Untitled Session"
-
-    now = datetime.now(timezone.utc)
-    conv = Conversation(
-        id=session_id,
-        title=title,
-        source="claude_code",
-        model=meta["model"],
-        created_at=_parse_iso(meta["first_ts"]) if meta["first_ts"] else now,
-        updated_at=_parse_iso(meta["last_ts"]) if meta["last_ts"] else now,
-        tags=["claude-code"],
+    conv = build_conversation(
+        messages, meta, path,
+        source_type="claude_code_full",
+        importer_mode="full",
     )
-
-    for msg in messages:
-        conv.add_message(msg)
-
-    conv.metadata["_provenance"] = {
-        "source_type": "claude_code_full",
-        "source_file": path,
-        "source_id": session_id,
-    }
-    conv.metadata["importer_mode"] = "full"
-
     return [conv]
 
 

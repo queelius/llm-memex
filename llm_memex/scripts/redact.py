@@ -229,14 +229,14 @@ def _print_dry_run(pending, level, stats):
             terms = ", ".join(sorted({m.term for m in result.matches}))
             print(f"  [CONV]  conv {conv_short}...: matches across messages: {terms}")
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     if stats["word_redactions"]:
         print(f"  Word-level redactions:  {stats['word_redactions']}")
     if stats["message_redactions"]:
         print(f"  Message-level redactions: {stats['message_redactions']}")
     if stats["conversation_deletions"]:
         print(f"  Conversation deletions: {stats['conversation_deletions']}")
-    print(f"\nRe-run with --apply to commit changes.")
+    print("\nRe-run with --apply to commit changes.")
 
 
 # -- Mutation Engine ---------------------------------------------------------

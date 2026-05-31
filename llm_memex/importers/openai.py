@@ -137,11 +137,7 @@ def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
         if isinstance(part, str):
             blocks.append(text_block(part))
         elif isinstance(part, dict):
-            if "asset_pointer" in part:
-                blocks.append(
-                    media_block("image/png", url=part.get("asset_pointer", ""))
-                )
-            elif part.get("content_type") == "image_asset_pointer":
+            if "asset_pointer" in part or part.get("content_type") == "image_asset_pointer":
                 blocks.append(
                     media_block("image/png", url=part.get("asset_pointer", ""))
                 )

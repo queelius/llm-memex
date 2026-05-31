@@ -14,10 +14,8 @@ import io
 import json
 import os
 import tarfile
-import tempfile
 import zipfile
 from datetime import date
-from pathlib import Path
 from typing import Any, Dict, List
 
 from llm_memex.models import Conversation
@@ -243,22 +241,13 @@ def _schema_yaml_bytes(
     """Render schema.yaml as bytes."""
     import yaml
 
-    metadata_keys: Dict[str, Dict[str, Any]] = {}
-    for key, info in schema.items():
-        entry: Dict[str, Any] = {
-            "type": info["type"],
-            "count": info["count"],
-        }
-        if "values" in info:
-            entry["values"] = list(info["values"])
-        elif "example" in info:
-            entry["example"] = info["example"]
-        metadata_keys[key] = entry
-
+    # ``_compute_schema`` already returns per-key entries shaped exactly as
+    # ``{type, count, values|example}`` (with ``values`` as a list), in the
+    # insertion order this YAML needs, so it can be embedded directly.
     doc = {
         "conversations": {
             "record_count": record_count,
-            "metadata_keys": metadata_keys,
+            "metadata_keys": schema,
         }
     }
     buf = io.StringIO()

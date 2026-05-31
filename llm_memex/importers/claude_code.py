@@ -8,7 +8,6 @@ assistant text responses. Tool use, thinking blocks, progress events, and file
 snapshots are stripped. Metadata records the mode as "conversation_only" so a
 future full-fidelity importer (claude_code_full) can coexist.
 """
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -16,9 +15,9 @@ from llm_memex.models import Conversation, Message, text_block
 from llm_memex.importers._claude_code_common import (
     detect,  # re-exported as public API
     parse_iso as _parse_iso,
-    slug_to_title as _slug_to_title,
     parse_records,
     extract_session_metadata,
+    build_conversation,
     import_directory,
 )
 
@@ -107,28 +106,9 @@ def _import_single(path: str) -> List[Conversation]:
     if not messages:
         return []
 
-    # Build title from slug
-    title = _slug_to_title(meta["slug"]) if meta["slug"] else "Untitled Session"
-
-    now = datetime.now(timezone.utc)
-    conv = Conversation(
-        id=session_id,
-        title=title,
-        source="claude_code",
-        model=meta["model"],
-        created_at=_parse_iso(meta["first_ts"]) if meta["first_ts"] else now,
-        updated_at=_parse_iso(meta["last_ts"]) if meta["last_ts"] else now,
-        tags=["claude-code"],
+    conv = build_conversation(
+        messages, meta, path,
+        source_type="claude_code",
+        importer_mode="conversation_only",
     )
-
-    for msg in messages:
-        conv.add_message(msg)
-
-    conv.metadata["_provenance"] = {
-        "source_type": "claude_code",
-        "source_file": path,
-        "source_id": session_id,
-    }
-    conv.metadata["importer_mode"] = "conversation_only"
-
     return [conv]

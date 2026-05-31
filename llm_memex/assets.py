@@ -75,8 +75,8 @@ def _safe_filename(name: str | None, msg_id: str, index: int, media_type: str) -
         if not safe.lower().endswith(ext):
             safe = safe + ext
         return safe
-    # No name — generate from message ID and block index
-    short_id = msg_id[:8] if len(msg_id) >= 8 else msg_id
+    # No name: generate from message ID and block index
+    short_id = msg_id[:8]
     return f"{short_id}_{index}{ext}"
 
 
