@@ -133,6 +133,31 @@ class TestHelpers:
         assert "(" not in result
         assert result.endswith(".png")
 
+    def test_media_type_to_ext_junk_falls_back_to_bin(self):
+        """A junk/attacker-controlled media_type must not produce a junk
+        extension (MCA-6). Shell-injection-looking and traversal-looking
+        subtypes fall back to a safe ".bin"."""
+        # Shell metacharacters in the subtype must not leak into the ext.
+        assert _media_type_to_ext("image/png; rm -rf") == ".bin"
+        # Path-traversal-looking subtype must not become ".." .
+        assert _media_type_to_ext("x/..") == ".bin"
+        # Slashes / spaces / nonsense fall back too.
+        assert _media_type_to_ext("foo/bar baz") == ".bin"
+
+    def test_media_type_to_ext_clean_subtype_still_works(self):
+        """A clean (alphanumeric) unknown subtype is still honored."""
+        assert _media_type_to_ext("image/tiff") == ".tiff"
+        assert _media_type_to_ext("application/x-tar") == ".x-tar"
+
+    def test_safe_filename_with_junk_media_type_has_safe_ext(self):
+        """When no name is supplied, the generated filename uses a safe ext
+        even if media_type is junk (MCA-6)."""
+        result = _safe_filename(None, "abcdefghij", 0, "image/png; rm -rf")
+        assert result == "abcdefgh_0.bin"
+        # No shell metacharacters or spaces leaked into the filename.
+        assert ";" not in result
+        assert " " not in result
+
 
 # ── resolve_openai_assets ───────────────────────────────────────
 
@@ -286,6 +311,55 @@ class TestCopyAssets:
         conv = _make_conv([text_block("just text")])
         count = copy_assets(conv, asset_dir)
         assert count == 0
+
+    def test_malformed_base64_does_not_raise(self, tmp_path):
+        """MCA-1: a media block with malformed base64 must not abort the
+        import. copy_assets should skip the bad block (leaving its data
+        intact, writing no file) and still process the other blocks."""
+        raw_good = b"good image bytes"
+        good_b64 = base64.b64encode(raw_good).decode()
+        # "Incorrect padding": length not a multiple of 4 and bogus chars.
+        bad_b64 = "not-valid-base64!!!"
+        asset_dir = tmp_path / "assets"
+        conv = _make_conv([
+            media_block("image/png", data=bad_b64, filename="bad.png"),
+            media_block("image/png", data=good_b64, filename="good.png"),
+        ])
+        # Must not raise binascii.Error / ValueError.
+        count = copy_assets(conv, asset_dir)
+        # Only the good block was written.
+        assert count == 1
+        bad_block = conv.messages["m1"].content[0]
+        good_block = conv.messages["m1"].content[1]
+        # Bad block: data preserved, no url rewrite, no file written.
+        assert bad_block.get("data") == bad_b64
+        assert "url" not in bad_block or not bad_block.get("url", "").startswith("assets/")
+        # Good block: written and rewritten.
+        assert good_block["url"].startswith("assets/")
+        assert "data" not in good_block
+        written = asset_dir / good_block["url"].removeprefix("assets/")
+        assert written.read_bytes() == raw_good
+
+    def test_copy_from_absolute_path_drops_data_key(self, tmp_path):
+        """assets minor: Case 1 (file-copy branch) must also drop a
+        co-present stale base64 ``data`` key so it does not re-serialize."""
+        src_file = tmp_path / "source" / "photo.png"
+        src_file.parent.mkdir()
+        src_file.write_bytes(b"PNG image data")
+
+        stale_b64 = base64.b64encode(b"stale embedded copy").decode()
+        asset_dir = tmp_path / "db" / "assets"
+        conv = _make_conv([
+            media_block("image/png", url=str(src_file), data=stale_b64),
+        ])
+        count = copy_assets(conv, asset_dir)
+        assert count == 1
+        block = conv.messages["m1"].content[0]
+        assert block["url"].startswith("assets/")
+        # Stale base64 must be gone for consistency with the base64 branch.
+        assert "data" not in block
+        copied = asset_dir / block["url"].removeprefix("assets/")
+        assert copied.read_bytes() == b"PNG image data"
 
 
 # ── resolve_source_assets ───────────────────────────────────────

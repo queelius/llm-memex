@@ -67,6 +67,32 @@ class TestLoadConfig:
         monkeypatch.setenv("MEMEX_SQL_WRITE", "no")
         assert load_config(str(cfg))["sql_write"] is False
 
+    def test_non_mapping_yaml_list_raises_clear_error(self, tmp_path):
+        """A top-level YAML list (not a mapping) must raise a clear, file-named error.
+
+        Regression for MCA-4: config.update(loaded) raised a cryptic
+        ValueError/TypeError when safe_load returned a non-dict. The MCP server
+        loads config at startup, so a malformed user config should fail with a
+        message that names the file, not an opaque traceback.
+        """
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("- one\n- two\n")
+        with pytest.raises(ValueError) as exc_info:
+            load_config(str(cfg))
+        msg = str(exc_info.value)
+        assert str(cfg) in msg
+        assert "mapping" in msg
+
+    def test_non_mapping_yaml_scalar_raises_clear_error(self, tmp_path):
+        """A top-level YAML scalar (e.g. truncated/garbage int) must also raise clearly."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("42\n")
+        with pytest.raises(ValueError) as exc_info:
+            load_config(str(cfg))
+        msg = str(exc_info.value)
+        assert str(cfg) in msg
+        assert "mapping" in msg
+
 
 class TestDatabaseRegistry:
     @staticmethod
@@ -160,3 +186,35 @@ class TestDatabaseRegistry:
         })
         assert len(reg.all_dbs()) == 0
         reg.close()
+
+    def test_db_config_missing_path_raises_clear_error(self):
+        """A databases entry without 'path' must raise a clear, name-bearing error.
+
+        Regression for MCA-5: db_config["path"] raised a bare KeyError('path')
+        that did not say which database was misconfigured.
+        """
+        with pytest.raises(ValueError) as exc_info:
+            DatabaseRegistry({
+                "databases": {"main": {"readonly": True}},
+                "primary": "main",
+                "sql_write": False,
+            })
+        msg = str(exc_info.value)
+        assert "main" in msg
+        assert "path" in msg
+
+    def test_db_config_not_a_mapping_raises_clear_error(self):
+        """A databases entry whose value is not a mapping must raise a clear error.
+
+        Regression for MCA-5: a string/scalar db_config caused
+        db_config["path"] to raise a confusing TypeError instead of naming
+        the offending database.
+        """
+        with pytest.raises(ValueError) as exc_info:
+            DatabaseRegistry({
+                "databases": {"main": "/tmp/main"},
+                "primary": "main",
+                "sql_write": False,
+            })
+        msg = str(exc_info.value)
+        assert "main" in msg

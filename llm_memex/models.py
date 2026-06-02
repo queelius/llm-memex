@@ -29,6 +29,38 @@ def thinking_block(text: str) -> ContentBlock:
     return {"type": "thinking", "text": text}
 
 
+import re
+
+# Schemes/paths permitted as media link targets in exported markdown. Mirrors the
+# HTML SPA's safeMediaUrl allowlist (see exporters/html_template.py): anything
+# else (javascript:, vbscript:, data:text/html, file:, ...) is dropped to a
+# plain-text label so the markdown, which is routinely rendered to HTML, cannot
+# carry an active payload.
+_SAFE_MEDIA_URL_RE = re.compile(
+    r"""^(
+        https?:                 # http(s) links
+      | mailto:                 # email links
+      | data:image/             # inline image data URIs only
+      | data:audio/             # inline audio data URIs only
+      | data:video/             # inline video data URIs only
+      | assets/                 # exporter-local asset paths
+      | (?!\w+:)                # any path that is NOT scheme-prefixed (relative)
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_safe_media_url(url: str) -> bool:
+    """True if url may be emitted as a markdown link target. Reject anything with
+    HTML-dangerous characters outright (defense in depth against attribute escape
+    via crafted filenames/urls), then require the allowlisted scheme/path shape."""
+    if not url:
+        return False
+    if re.search(r"""["'<>`\s]""", url):
+        return False
+    return _SAFE_MEDIA_URL_RE.match(url) is not None
+
+
 def _render_media_md(block: ContentBlock) -> str:
     """Render a media content block as markdown."""
     media_type = block.get("media_type", "")
@@ -42,6 +74,13 @@ def _render_media_md(block: ContentBlock) -> str:
 
     if not url:
         return f"[{filename}]" if filename else ""
+
+    # We have a URL. Drop unsafe targets (javascript:, data:text/html, etc.) to a
+    # plain-text label with no link, so exported markdown (often rendered to HTML)
+    # cannot carry an active payload. Valid targets fall through to normal rendering.
+    if not _is_safe_media_url(url):
+        label = filename or (media_type.split("/")[0] if media_type else "") or "attachment"
+        return f"[attachment: {label}]"
 
     if media_type.startswith("image/"):
         alt = filename or "image"
@@ -72,8 +111,10 @@ class Message:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get_text(self) -> str:
+        # str(...) guards against malformed imports where "text" is non-str
+        # (e.g. an int), which would otherwise raise TypeError on the join.
         return "\n".join(
-            block["text"] for block in self.content
+            str(block["text"]) for block in self.content
             if block.get("type") == "text" and block.get("text")
         )
 

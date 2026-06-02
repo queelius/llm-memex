@@ -21,6 +21,8 @@ def load_config(config_path: str | None = None) -> Dict[str, Any]:
     if config_path and Path(config_path).exists():
         with open(config_path) as f:
             loaded = yaml.safe_load(f) or {}
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{config_path}: top-level YAML must be a mapping")
         config.update(loaded)
     elif env_path := os.environ.get("MEMEX_DATABASE_PATH"):
         config["databases"] = {"default": {"path": env_path}}
@@ -43,6 +45,13 @@ class DatabaseRegistry:
         self._dbs: Dict[str, Database] = {}
         readonly = not self.sql_write
         for name, db_config in config.get("databases", {}).items():
+            if not isinstance(db_config, dict):
+                raise ValueError(
+                    f"database '{name}' config must be a mapping, "
+                    f"got {type(db_config).__name__}"
+                )
+            if "path" not in db_config:
+                raise ValueError(f"database '{name}' is missing required 'path'")
             path = os.path.expanduser(db_config["path"])
             self._dbs[name] = Database(path, readonly=readonly)
 

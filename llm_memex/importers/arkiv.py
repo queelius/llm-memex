@@ -122,12 +122,16 @@ def detect(path: str) -> bool:
                     member = tf.getmember("conversations.jsonl")
                 except KeyError:
                     return False
+                # extractfile() can raise KeyError (e.g. a symlink member with
+                # an unresolvable linkname), which is NOT a tarfile.TarError.
+                # Catch it (and other I/O-ish errors) so a malformed bundle
+                # returns False rather than aborting auto-detection.
                 extracted = tf.extractfile(member)
                 if extracted is None:
                     return False
                 rec = _jsonl_peek_first_record(extracted)
             return rec is not None and _is_llm_memex_arkiv_record(rec)
-        except tarfile.TarError:
+        except (tarfile.TarError, KeyError, OSError, EOFError):
             return False
 
     # bare .jsonl.gz (single-file arkiv, e.g. emitted by the browser SPA)
@@ -170,8 +174,15 @@ def _open_jsonl(path: str) -> Iterable[Dict[str, Any]]:
     lower = str(p).lower()
     if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
         with tarfile.open(p, "r:gz") as tf:
-            member = tf.getmember("conversations.jsonl")
-            extracted = tf.extractfile(member)
+            # getmember/extractfile can raise KeyError (missing member, or a
+            # symlink member with an unresolvable linkname) which is NOT a
+            # tarfile.TarError; treat any such failure as "nothing to read"
+            # rather than letting it propagate and abort the import.
+            try:
+                member = tf.getmember("conversations.jsonl")
+                extracted = tf.extractfile(member)
+            except (tarfile.TarError, KeyError, OSError, EOFError):
+                return
             if extracted is None:
                 return
             text = io.TextIOWrapper(extracted, encoding="utf-8")
@@ -276,12 +287,15 @@ def _reconstruct_conversation(
     )
 
     prev_id: Optional[str] = None
-    for _, rec in recs_sorted:
+    for pos, (_, rec) in enumerate(recs_sorted):
         meta = rec.get("metadata") or {}
         msg_id = meta.get("message_id")
         if not msg_id:
-            # Synthesize a stable id from conv + index so re-imports match.
-            msg_id = f"{conv_id}:{recs_sorted.index((_, rec))}"
+            # Synthesize a stable id from conv + position so re-imports match.
+            # ``pos`` is the index within recs_sorted; since each original
+            # index is unique, this equals the old list.index() result but in
+            # O(1) instead of O(n) per record.
+            msg_id = f"{conv_id}:{pos}"
         role = meta.get("role") or "unknown"
         content_text = rec.get("content") or ""
         created = _parse_timestamp(rec.get("timestamp"))

@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from llm_memex.importers import parse_timestamp
 from llm_memex.models import (
     Conversation,
     Message,
@@ -17,12 +18,13 @@ from llm_memex.models import (
 def _detect_file(path: str) -> bool:
     """Check if a single file is an OpenAI conversations.json export."""
     try:
-        with open(path) as f:
+        # utf-8-sig tolerates a leading BOM (otherwise json.load raises).
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
-        if isinstance(data, list) and data and "mapping" in data[0]:
+        if isinstance(data, list) and data and isinstance(data[0], dict) and "mapping" in data[0]:
             return True
         return False
-    except (json.JSONDecodeError, IOError, KeyError, IndexError, ValueError):
+    except (json.JSONDecodeError, IOError, OSError, KeyError, IndexError, ValueError):
         return False
 
 
@@ -45,7 +47,7 @@ def import_path(path: str) -> List[Conversation]:
 
 def _import_file(path: str) -> List[Conversation]:
     """Import conversations from a single OpenAI export file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     if not isinstance(data, list):
         data = [data]
@@ -60,42 +62,55 @@ def _import_file(path: str) -> List[Conversation]:
 def _import_conversation(data: dict, source_path: str = None) -> Optional[Conversation]:
     conv_id = data.get("id") or data.get("conversation_id", "")
     mapping = data.get("mapping", {})
+    if not isinstance(mapping, dict):
+        return None
     if not mapping:
         return None
+    # create_time==0 is a valid epoch (1970), so test "is not None", not truthiness.
     created = (
-        datetime.fromtimestamp(data["create_time"])
-        if data.get("create_time")
-        else datetime.now()
-    )
+        parse_timestamp(data.get("create_time"))
+        if data.get("create_time") is not None
+        else None
+    ) or datetime.now()
     updated = (
-        datetime.fromtimestamp(data["update_time"])
-        if data.get("update_time")
-        else created
-    )
+        parse_timestamp(data.get("update_time"))
+        if data.get("update_time") is not None
+        else None
+    ) or created
     conv = Conversation(
         id=conv_id,
-        title=data.get("title"),
+        title=data.get("title") or "Untitled Conversation",
         source="openai",
         created_at=created,
         updated_at=updated,
     )
     model = None
     for node_id, node in mapping.items():
+        if not isinstance(node, dict):
+            continue
         msg_data = node.get("message")
         if not msg_data:
             continue
-        role = msg_data.get("author", {}).get("role", "unknown")
-        if role == "system" and not msg_data.get("content", {}).get("parts"):
+        if not isinstance(msg_data, dict):
+            continue
+        author = msg_data.get("author") or {}
+        role = author.get("role", "unknown") if isinstance(author, dict) else "unknown"
+        content_obj = msg_data.get("content") or {}
+        if role == "system" and not (
+            isinstance(content_obj, dict) and content_obj.get("parts")
+        ):
             continue
         content = _extract_content(msg_data)
         if not content:
             content = [text_block("")]
-        msg_model = msg_data.get("metadata", {}).get("model_slug")
+        metadata = msg_data.get("metadata") or {}
+        msg_model = metadata.get("model_slug") if isinstance(metadata, dict) else None
         if msg_model and role == "assistant":
             model = msg_model
         parent_id = node.get("parent")
         # Skip virtual root nodes (nodes without messages)
-        if parent_id and mapping.get(parent_id, {}).get("message") is None:
+        if parent_id and isinstance(mapping.get(parent_id), dict) and \
+                mapping.get(parent_id, {}).get("message") is None:
             parent_id = None
         msg = Message(
             id=node_id,
@@ -104,8 +119,8 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
             parent_id=parent_id,
             model=msg_model,
             created_at=(
-                datetime.fromtimestamp(msg_data["create_time"])
-                if msg_data.get("create_time")
+                parse_timestamp(msg_data.get("create_time"))
+                if msg_data.get("create_time") is not None
                 else None
             ),
         )
@@ -121,12 +136,18 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
 
 def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
     """Extract content blocks from an OpenAI message."""
-    parts = msg_data.get("content", {}).get("parts", [])
-    content_type = msg_data.get("content", {}).get("content_type", "text")
+    content_obj = msg_data.get("content") or {}
+    if not isinstance(content_obj, dict):
+        content_obj = {}
+    parts = content_obj.get("parts") or []
+    if not isinstance(parts, list):
+        parts = []
+    content_type = content_obj.get("content_type", "text")
     blocks = []
 
     # Handle tool calls / tool results via metadata
-    author_role = msg_data.get("author", {}).get("role", "")
+    author = msg_data.get("author") or {}
+    author_role = author.get("role", "") if isinstance(author, dict) else ""
     if content_type == "tether_browsing_display":
         text = "\n".join(str(p) for p in parts if isinstance(p, str))
         if text:

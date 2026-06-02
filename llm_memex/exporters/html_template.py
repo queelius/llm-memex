@@ -2508,7 +2508,13 @@ def _js_ui() -> str:
 
 def _js_chat(schema_ddl: str = "") -> str:
     """Chat functionality: librarian agentic loop and resume-conversation chat."""
-    # Escape schema_ddl for embedding in JS string
+    # Escape schema_ddl for embedding in JS string. The string-literal escapes
+    # (backslash, backtick, $, quote, CR, LF) are not enough on their own: this
+    # value lands inside an inline <script>, and the HTML tokenizer terminates a
+    # <script> at the first literal </script> regardless of JS quoting. Escaping
+    # the slash in any "</" (harmless in JS) prevents a schema_ddl carrying
+    # </script> (a view/trigger/index name or body) from breaking out into live
+    # markup (EXP-1).
     escaped_ddl = (
         schema_ddl
         .replace("\\", "\\\\")
@@ -2517,6 +2523,7 @@ def _js_chat(schema_ddl: str = "") -> str:
         .replace("'", "\\'")
         .replace("\r", "\\r")
         .replace("\n", "\\n")
+        .replace("</", "<\\/")
     )
     return (
         '/* -- chat constants -------------------------------------------------- */\n'

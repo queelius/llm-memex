@@ -862,3 +862,125 @@ class TestRedactDBIntegration:
         assert "secret" not in (reloaded.title or "").lower()
         assert "[REDACTED]" in reloaded.title
         db.close()
+
+
+# ── REDACT-4: Atomicity of the two writes per redaction ────────
+
+
+class TestApplySingleAtomicity:
+    """_apply_single performs an enrichment write and a message-content write.
+
+    REDACT-4: those two writes must be atomic. A crash/raise between them must
+    not leave a committed plaintext `original_content` enrichment while the
+    message is still un-redacted (or vice versa).
+    """
+
+    def test_word_level_consistent_on_success(self, tmp_db_path):
+        """On success: message is redacted AND the original_content enrichment
+        holds the pre-redaction content (both writes applied, consistently)."""
+        from llm_memex.scripts.redact import compile_matchers, scan_message, _apply_single
+        db = Database(tmp_db_path)
+        conv = _make_conv_with_text("contains secret here")
+        db.save_conversation(conv)
+        matchers = compile_matchers(words=["secret"])
+        content = [{"type": "text", "text": "contains secret here"}]
+        result = scan_message(content, matchers, "c1", "m1")
+        _apply_single(db, result, "word")
+        # Message redacted
+        reloaded = db.load_conversation("c1")
+        text = reloaded.messages["m1"].get_text()
+        assert "[REDACTED]" in text
+        assert "secret" not in text
+        # Enrichment holds the ORIGINAL (pre-redaction) content
+        originals = [e for e in db.get_enrichments("c1")
+                     if e["type"] == "original_content"]
+        assert len(originals) == 1
+        stored = json.loads(originals[0]["value"])
+        assert stored["message_id"] == "m1"
+        assert stored["content"] == [{"type": "text", "text": "contains secret here"}]
+        db.close()
+
+    def test_word_level_rolls_back_if_message_update_fails(self, tmp_db_path):
+        """If the message-content write raises, NO original_content enrichment
+        is left committed (the enrichment write rolls back too)."""
+        from llm_memex.scripts.redact import compile_matchers, scan_message, _apply_single
+        db = Database(tmp_db_path)
+        conv = _make_conv_with_text("contains secret here")
+        db.save_conversation(conv)
+        matchers = compile_matchers(words=["secret"])
+        content = [{"type": "text", "text": "contains secret here"}]
+        result = scan_message(content, matchers, "c1", "m1")
+
+        with patch.object(db, "update_message_content",
+                          side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                _apply_single(db, result, "word")
+
+        # No plaintext enrichment leaked
+        originals = [e for e in db.get_enrichments("c1")
+                     if e["type"] == "original_content"]
+        assert originals == []
+        # Message left intact (still contains the secret, not half-redacted)
+        reloaded = db.load_conversation("c1")
+        assert "secret" in reloaded.messages["m1"].get_text()
+        assert "[REDACTED]" not in reloaded.messages["m1"].get_text()
+        db.close()
+
+    def test_message_level_rolls_back_if_message_update_fails(self, tmp_db_path):
+        """Same atomicity guarantee for level='message'."""
+        from llm_memex.scripts.redact import compile_matchers, scan_message, _apply_single
+        db = Database(tmp_db_path)
+        conv = _make_conv_with_text("contains secret here")
+        db.save_conversation(conv)
+        matchers = compile_matchers(words=["secret"])
+        content = [{"type": "text", "text": "contains secret here"}]
+        result = scan_message(content, matchers, "c1", "m1")
+
+        with patch.object(db, "update_message_content",
+                          side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                _apply_single(db, result, "message")
+
+        originals = [e for e in db.get_enrichments("c1")
+                     if e["type"] == "original_content"]
+        assert originals == []
+        reloaded = db.load_conversation("c1")
+        assert "secret" in reloaded.messages["m1"].get_text()
+        db.close()
+
+
+class TestBatchPerItemFailure:
+    """REDACT-4: the --yes batch loop must catch per-item failures, continue,
+    and surface which conversations failed."""
+
+    def test_batch_continues_and_reports_failed_conv(self, tmp_db_path):
+        from llm_memex.scripts.redact import run
+        db = Database(tmp_db_path)
+        conv1 = _make_conv_with_text("has secret one", id="c1")
+        conv2 = _make_conv_with_text("has secret two", id="c2")
+        db.save_conversation(conv1)
+        db.save_conversation(conv2)
+
+        real_update = db.update_message_content
+
+        def flaky_update(conversation_id, message_id, content):
+            if conversation_id == "c1":
+                raise RuntimeError("boom on c1")
+            return real_update(conversation_id, message_id, content)
+
+        args = _make_args(words="secret", level="word", yes=True)
+        with patch.object(db, "update_message_content", side_effect=flaky_update):
+            stats = run(db, args, apply=True)
+
+        # The batch did not abort: c2 was still redacted.
+        r2 = db.load_conversation("c2")
+        assert "[REDACTED]" in r2.messages["m1"].get_text()
+        # c1 failed cleanly: not half-applied, no leaked enrichment.
+        r1 = db.load_conversation("c1")
+        assert "secret" in r1.messages["m1"].get_text()
+        assert [e for e in db.get_enrichments("c1")
+                if e["type"] == "original_content"] == []
+        # The failure is surfaced (which conversation failed).
+        assert "c1" in stats.get("failed", [])
+        assert "c2" not in stats.get("failed", [])
+        db.close()

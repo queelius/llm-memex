@@ -172,9 +172,16 @@ def _make_conv(id="c1", title="Test", msg_text="hello"):
 
 
 class TestScriptDiscoveryEdgeCases:
-    def test_discover_skips_modules_that_raise_on_import(self, tmp_path):
-        """Modules that raise ImportError during load are silently skipped."""
+    def test_discover_does_not_execute_modules_that_raise_on_import(self, tmp_path):
+        """Discovery parses statically: a module whose IMPORT would raise is
+        still listed (its top-level code is never executed during discovery).
+
+        REDACT-3: discovery must not exec_module. A module that would blow up
+        on import (or run arbitrary side effects) must not do so merely from
+        being discovered/listed. The failure is deferred to load_script.
+        """
         (tmp_path / "badmod.py").write_text(
+            '"""Bad module."""\n'
             'import nonexistent_module_xyz\n'
             'def register_args(p): pass\n'
             'def run(d,a,apply=False): return {}\n'
@@ -185,8 +192,65 @@ class TestScriptDiscoveryEdgeCases:
         with patch("llm_memex.scripts._builtin_dir", return_value=tmp_path):
             with patch("llm_memex.scripts._user_dir", return_value=tmp_path / "nope"):
                 scripts = discover_scripts()
-        assert "badmod" not in scripts
+        # badmod has the required interface (statically) and is listed without
+        # ever importing nonexistent_module_xyz.
+        assert "badmod" in scripts
+        assert scripts["badmod"]["description"] == "Bad module."
         assert "goodmod" in scripts
+
+    def test_user_script_not_executed_during_discovery(self, tmp_path):
+        """REDACT-3: a module dropped in the user scripts dir is NOT executed
+        by discovery or listing.
+
+        Arbitrary code at module top level (here: writing a sentinel file and
+        raising) must not run merely because `llm-memex run --list` enumerates
+        scripts. Discovery reads the description statically via ast and defers
+        any execution to load_script.
+        """
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        user = tmp_path / "user"
+        user.mkdir()
+        sentinel = tmp_path / "SENTINEL_EXECUTED"
+        # Top-level code writes a sentinel AND raises. If discovery imports it,
+        # the sentinel appears (and/or the exception is swallowed).
+        (user / "evil.py").write_text(
+            '"""Evil script."""\n'
+            'from pathlib import Path\n'
+            f'Path({str(sentinel)!r}).write_text("executed")\n'
+            'raise RuntimeError("top-level code ran")\n'
+            'def register_args(p): pass\n'
+            'def run(d,a,apply=False): return {}\n'
+        )
+        with patch("llm_memex.scripts._builtin_dir", return_value=builtin):
+            with patch("llm_memex.scripts._user_dir", return_value=user):
+                scripts = discover_scripts()
+        assert not sentinel.exists(), "discovery executed user module top-level code"
+        # Still discoverable + described, just not executed.
+        assert "evil" in scripts
+        assert scripts["evil"]["description"] == "Evil script."
+
+    def test_run_list_does_not_execute_user_scripts(self, tmp_path):
+        """REDACT-3: `run --list` enumerates user scripts without executing them."""
+        from llm_memex.cli import _cmd_run
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        user = tmp_path / "user"
+        user.mkdir()
+        sentinel = tmp_path / "SENTINEL_LIST"
+        (user / "evil.py").write_text(
+            '"""Evil list script."""\n'
+            'from pathlib import Path\n'
+            f'Path({str(sentinel)!r}).write_text("executed")\n'
+            'def register_args(p): pass\n'
+            'def run(d,a,apply=False): return {}\n'
+        )
+        args = argparse.Namespace(name=None, list=True, apply=False, verbose=False,
+                                  db=str(tmp_path))
+        with patch("llm_memex.scripts._builtin_dir", return_value=builtin):
+            with patch("llm_memex.scripts._user_dir", return_value=user):
+                _cmd_run(args, [])
+        assert not sentinel.exists(), "run --list executed a user script"
 
     def test_extract_description_no_docstring(self, tmp_path):
         """Module without docstring gets empty description."""

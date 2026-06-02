@@ -32,7 +32,9 @@ def detect_file(path: str) -> bool:
             return False
         has_known_type = False
         has_session_id = False
-        with open(path) as f:
+        # errors="replace" tolerates corrupt (non-UTF8) bytes; the per-line JSON
+        # try/except then skips any line the replacement made unparseable.
+        with open(path, encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
                 if i >= 10:
                     break
@@ -62,9 +64,18 @@ def detect(path: str) -> bool:
     return detect_file(path)
 
 
-def parse_iso(ts: str) -> datetime:
-    """Parse ISO 8601 timestamp, handling trailing Z."""
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+def parse_iso(ts: Any) -> Optional[datetime]:
+    """Parse ISO 8601 timestamp, handling trailing Z.
+
+    Tolerates non-string input (a malformed export may carry a numeric or null
+    timestamp): returns None instead of raising AttributeError / ValueError.
+    """
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def slug_to_title(slug: str) -> str:
@@ -75,7 +86,9 @@ def slug_to_title(slug: str) -> str:
 def parse_records(path: str) -> List[Dict[str, Any]]:
     """Parse a JSONL file into a list of records, skipping corrupted lines."""
     records = []
-    with open(path) as f:
+    # errors="replace" tolerates corrupt (non-UTF8) bytes; the per-line JSON
+    # try/except then skips any line the replacement made unparseable.
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line or line[0] == '\x00':
@@ -109,7 +122,9 @@ def extract_session_metadata(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 first_ts = ts
             last_ts = ts
         if model is None and rec.get("type") == "assistant":
-            model = rec.get("message", {}).get("model")
+            msg = rec.get("message")
+            if isinstance(msg, dict):
+                model = msg.get("model")
 
     return {
         "session_id": session_id,
@@ -137,13 +152,16 @@ def build_conversation(
     title = slug_to_title(meta["slug"]) if meta["slug"] else "Untitled Session"
 
     now = datetime.now(timezone.utc)
+    # parse_iso returns None for a non-string / malformed timestamp; fall back to now.
+    created_at = (parse_iso(meta["first_ts"]) if meta["first_ts"] else None) or now
+    updated_at = (parse_iso(meta["last_ts"]) if meta["last_ts"] else None) or now
     conv = Conversation(
         id=session_id,
         title=title,
         source="claude_code",
         model=meta["model"],
-        created_at=parse_iso(meta["first_ts"]) if meta["first_ts"] else now,
-        updated_at=parse_iso(meta["last_ts"]) if meta["last_ts"] else now,
+        created_at=created_at,
+        updated_at=updated_at,
         tags=["claude-code"],
     )
 

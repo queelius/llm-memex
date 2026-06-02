@@ -1,6 +1,10 @@
 """Tests for memex importers: OpenAI, Anthropic, Gemini, Claude Code."""
 import json
+import math
+from datetime import datetime, timezone
 
+from llm_memex.importers import parse_timestamp, detect_model
+from llm_memex.importers._claude_code_common import parse_iso as cc_parse_iso
 from llm_memex.importers.openai import detect as openai_detect
 from llm_memex.importers.openai import import_path as openai_import
 from llm_memex.importers.anthropic import detect as anthropic_detect
@@ -1342,3 +1346,545 @@ class TestClaudeCodeFullSubagentImport:
         convs = claude_code_import(str(d))
         assert len(convs) == 1
         assert convs[0].id == "sess-a"
+
+
+# ---------- Malformed/adversarial input hardening ----------
+
+# IMP-2 / IMP-7: parse_timestamp robustness and tz-awareness
+
+class TestParseTimestampHardening:
+    def test_out_of_range_numeric_epoch(self):
+        """A wildly out-of-range numeric epoch returns None, not a crash (IMP-2)."""
+        # 1e20 seconds is far beyond datetime's representable range.
+        assert parse_timestamp(1e20) is None
+
+    def test_negative_huge_numeric_epoch(self):
+        """A hugely negative epoch returns None instead of OverflowError (IMP-2)."""
+        assert parse_timestamp(-1e20) is None
+
+    def test_nan_epoch(self):
+        """NaN epoch returns None (IMP-2)."""
+        assert parse_timestamp(float("nan")) is None
+
+    def test_infinity_epoch(self):
+        """Infinity epoch returns None (IMP-2)."""
+        assert parse_timestamp(float("inf")) is None
+        assert parse_timestamp(float("-inf")) is None
+
+    def test_out_of_range_string_epoch(self):
+        """An out-of-range string epoch returns None instead of crashing (IMP-2)."""
+        assert parse_timestamp("1e20") is None
+
+    def test_numeric_epoch_is_utc_aware(self):
+        """Numeric epoch yields a timezone-aware UTC datetime (IMP-7)."""
+        dt = parse_timestamp(1700000000)
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt.utcoffset() == timezone.utc.utcoffset(None)
+        # 1700000000 == 2023-11-14T22:13:20 UTC
+        assert dt == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+
+    def test_iso_naive_treated_as_utc(self):
+        """A naive ISO string is treated as UTC and returned tz-aware (IMP-7)."""
+        dt = parse_timestamp("2024-01-01T00:00:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_iso_with_z_is_utc_aware(self):
+        """An ISO string with trailing Z is returned tz-aware UTC (IMP-7)."""
+        dt = parse_timestamp("2024-01-01T00:00:00Z")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_iso_with_offset_converted_to_utc(self):
+        """An ISO string with a non-UTC offset is converted to UTC (IMP-7)."""
+        dt = parse_timestamp("2024-01-01T05:00:00+05:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_numeric_and_iso_are_comparable(self):
+        """Mixed numeric and ISO timestamps are comparable (no naive/aware clash) (IMP-7)."""
+        a = parse_timestamp(1700000000)
+        b = parse_timestamp("2024-01-01T00:00:00Z")
+        # Comparison must not raise TypeError.
+        assert (a < b) or (a >= b)
+
+
+# IMP minor: detect_model must return a str or None even for non-string model values
+
+class TestDetectModelHardening:
+    def test_dict_model_value_not_returned(self):
+        """A dict model value is rejected: result is a str-or-None, never the dict (IMP minor)."""
+        result = detect_model({"model": {"name": "x"}}, ["messages"], "default")
+        assert result is None or isinstance(result, str)
+        assert not isinstance(result, dict)
+        # Malformed top-level model falls through to the default.
+        assert result == "default"
+
+    def test_list_model_value_not_returned(self):
+        """A list model value is rejected: result is a str-or-None, never the list (IMP minor)."""
+        result = detect_model({"model": ["a", "b"]}, ["messages"], "default")
+        assert result is None or isinstance(result, str)
+        assert not isinstance(result, list)
+        assert result == "default"
+
+    def test_dict_model_with_usable_message_model(self):
+        """A malformed top-level model still lets a valid message-level model win (IMP minor)."""
+        data = {"model": {"bad": "dict"}, "messages": [{"model": "gpt-4"}]}
+        result = detect_model(data, ["messages"], "default")
+        assert result == "gpt-4"
+
+    def test_string_model_value_preserved(self):
+        """A string model value is returned unchanged."""
+        assert detect_model({"model": "gpt-4"}, ["messages"], "default") == "gpt-4"
+
+    def test_missing_model_falls_to_default(self):
+        assert detect_model({}, ["messages"], "default") == "default"
+
+    def test_non_dict_message_in_scan_ignored(self):
+        """Non-dict entries in the message list don't crash the scan (IMP minor)."""
+        data = {"messages": ["not a dict", {"model": "gpt-4"}]}
+        assert detect_model(data, ["messages"], "default") == "gpt-4"
+
+
+# IMP-3: OpenAI importer with null/non-dict fields
+
+class TestOpenAIMalformed:
+    def test_null_content(self, tmp_path):
+        """A JSON-null content field does not crash import (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": None,
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 1
+
+    def test_null_author(self, tmp_path):
+        """A JSON-null author field does not crash import (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": None,
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        msg = list(convs[0].messages.values())[0]
+        assert msg.role == "unknown"
+
+    def test_non_dict_mapping(self, tmp_path):
+        """A non-dict mapping yields no conversation rather than crashing (IMP-3)."""
+        data = [{"id": "conv1", "mapping": ["not", "a", "dict"]}]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert convs == []
+
+    def test_non_dict_node(self, tmp_path):
+        """A non-dict node in the mapping is skipped (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "bad": "not a dict",
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 1
+
+    def test_non_dict_message(self, tmp_path):
+        """A non-dict message value is skipped (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "bad": {"id": "bad", "parent": None, "children": [], "message": "oops"},
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 1
+
+    def test_create_time_zero_not_now(self, tmp_path):
+        """create_time == 0 routes through parse_timestamp (epoch 0), not now() (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 0, "update_time": 0,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 0,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        conv = convs[0]
+        # Epoch 0 is 1970, definitely not "now" (this test runs well after 2020).
+        assert conv.created_at.year == 1970
+        msg = list(conv.messages.values())[0]
+        assert msg.created_at is not None
+        assert msg.created_at.year == 1970
+
+    def test_title_default_consistent(self, tmp_path):
+        """OpenAI title defaults to 'Untitled Conversation' like the others (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert convs[0].title == "Untitled Conversation"
+
+    def test_create_time_out_of_range_falls_back(self, tmp_path):
+        """An out-of-range create_time does not crash; falls back gracefully (IMP-3)."""
+        data = [{
+            "id": "conv1", "create_time": 1e20, "update_time": 1e20,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1e20,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_text(json.dumps(data))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        # created_at falls back to now() (current year), message created_at is None.
+        msg = list(convs[0].messages.values())[0]
+        assert msg.created_at is None
+
+
+# IMP-5/IMP-6: OpenAI file-level robustness (BOM)
+
+class TestOpenAIBom:
+    def test_detect_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break detect() (IMP-6)."""
+        f = tmp_path / "export.json"
+        payload = json.dumps([{
+            "id": "conv1",
+            "mapping": {"m1": {"message": {"content": {"parts": ["hi"]}}}},
+        }])
+        f.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+        assert openai_detect(str(f)) is True
+
+    def test_import_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break import_path() (IMP-6)."""
+        data = [{
+            "id": "conv1", "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {
+                "m1": {
+                    "id": "m1", "parent": None, "children": [],
+                    "message": {
+                        "id": "m1", "author": {"role": "user"},
+                        "content": {"parts": ["hello"]},
+                        "create_time": 1700000000,
+                    },
+                },
+            },
+        }]
+        f = tmp_path / "export.json"
+        f.write_bytes(b"\xef\xbb\xbf" + json.dumps(data).encode("utf-8"))
+        convs = openai_import(str(f))
+        assert len(convs) == 1
+        assert convs[0].id == "conv1"
+
+
+# IMP-4: Anthropic importer with null/non-list container, non-dict elements, numeric ts
+
+class TestAnthropicMalformed:
+    def test_null_messages_container(self, tmp_path):
+        """A null chat_messages container does not crash (IMP-4)."""
+        data = [{"uuid": "conv1", "name": "Test", "chat_messages": None}]
+        f = tmp_path / "claude.json"
+        f.write_text(json.dumps(data))
+        convs = anthropic_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 0
+
+    def test_dict_messages_container(self, tmp_path):
+        """A dict (non-list) messages container is coerced to empty (IMP-4)."""
+        data = [{"uuid": "conv1", "name": "Test", "chat_messages": {"k": "v"}}]
+        f = tmp_path / "claude.json"
+        f.write_text(json.dumps(data))
+        convs = anthropic_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 0
+
+    def test_non_dict_message_element(self, tmp_path):
+        """A non-dict element in chat_messages is skipped (IMP-4)."""
+        data = [{
+            "uuid": "conv1", "name": "Test",
+            "chat_messages": ["not a dict", {"uuid": "m1", "sender": "human", "text": "hi"}],
+        }]
+        f = tmp_path / "claude.json"
+        f.write_text(json.dumps(data))
+        convs = anthropic_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 1
+
+    def test_numeric_message_timestamp(self, tmp_path):
+        """A numeric message timestamp is parsed, not crashed on (IMP-4)."""
+        data = [{
+            "uuid": "conv1", "name": "Test",
+            "chat_messages": [
+                {"uuid": "m1", "sender": "human", "text": "hi",
+                 "created_at": 1700000000},
+            ],
+        }]
+        f = tmp_path / "claude.json"
+        f.write_text(json.dumps(data))
+        convs = anthropic_import(str(f))
+        msg = list(convs[0].messages.values())[0]
+        assert msg.created_at is not None
+        assert msg.created_at.year == 2023
+
+    def test_detect_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break Anthropic detect() (IMP-6)."""
+        f = tmp_path / "claude.json"
+        payload = json.dumps([{"uuid": "abc", "name": "Chat", "chat_messages": []}])
+        f.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+        assert anthropic_detect(str(f)) is True
+
+    def test_import_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break Anthropic import_path() (IMP-6)."""
+        data = [{"uuid": "conv1", "name": "Test",
+                 "chat_messages": [{"uuid": "m1", "sender": "human", "text": "hi"}]}]
+        f = tmp_path / "claude.json"
+        f.write_bytes(b"\xef\xbb\xbf" + json.dumps(data).encode("utf-8"))
+        convs = anthropic_import(str(f))
+        assert len(convs) == 1
+        assert convs[0].id == "conv1"
+
+
+# IMP-4 / IMP-8: Gemini importer with null/non-list container, string parts, numeric ts
+
+class TestGeminiMalformed:
+    def test_null_messages_container(self, tmp_path):
+        """A null turns container does not crash (IMP-4)."""
+        data = {"conversations": [{"id": "c1", "title": "T", "turns": None}]}
+        f = tmp_path / "gemini.json"
+        f.write_text(json.dumps(data))
+        convs = gemini_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 0
+
+    def test_non_dict_message_element(self, tmp_path):
+        """A non-dict turn element is skipped (IMP-4)."""
+        data = {"conversations": [{
+            "id": "c1", "title": "T",
+            "turns": ["not a dict", {"id": "m1", "role": "user", "parts": [{"text": "hi"}]}],
+        }]}
+        f = tmp_path / "gemini.json"
+        f.write_text(json.dumps(data))
+        convs = gemini_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 1
+
+    def test_string_parts_not_iterated_charwise(self, tmp_path):
+        """A string 'parts' value is not iterated character-by-character (IMP-8)."""
+        data = {"conversations": [{
+            "id": "c1", "title": "T",
+            "turns": [{"id": "m1", "role": "user", "parts": "hello"}],
+        }]}
+        f = tmp_path / "gemini.json"
+        f.write_text(json.dumps(data))
+        convs = gemini_import(str(f))
+        msg = list(convs[0].messages.values())[0]
+        # Must NOT produce 5 single-character text blocks.
+        text_blocks = [b for b in msg.content if b.get("type") == "text"]
+        assert all(b["text"] != "h" for b in text_blocks)
+        # Falls back to empty content (single empty text block), not char soup.
+        assert len(msg.content) <= 1
+
+    def test_numeric_message_timestamp(self, tmp_path):
+        """A numeric message timestamp is parsed, not crashed on (IMP-4)."""
+        data = {"conversations": [{
+            "id": "c1", "title": "T",
+            "turns": [{"id": "m1", "role": "user", "parts": [{"text": "hi"}],
+                       "timestamp": 1700000000}],
+        }]}
+        f = tmp_path / "gemini.json"
+        f.write_text(json.dumps(data))
+        convs = gemini_import(str(f))
+        msg = list(convs[0].messages.values())[0]
+        assert msg.created_at is not None
+        assert msg.created_at.year == 2023
+
+    def test_detect_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break Gemini detect() (IMP-6)."""
+        f = tmp_path / "gemini.json"
+        payload = json.dumps({"conversations": [{"id": "c1"}]})
+        f.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+        assert gemini_detect(str(f)) is True
+
+    def test_import_with_bom(self, tmp_path):
+        """A UTF-8 BOM does not break Gemini import_path() (IMP-6)."""
+        data = {"conversations": [{"id": "c1", "title": "T",
+                                   "turns": [{"id": "m1", "role": "user",
+                                              "parts": [{"text": "hi"}]}]}]}
+        f = tmp_path / "gemini.json"
+        f.write_bytes(b"\xef\xbb\xbf" + json.dumps(data).encode("utf-8"))
+        convs = gemini_import(str(f))
+        assert len(convs) == 1
+        assert convs[0].id == "c1"
+
+
+# IMP-3/IMP-4: Claude Code importers with non-dict message and numeric timestamp
+
+class TestClaudeCodeMalformed:
+    def test_parse_iso_non_string(self):
+        """parse_iso tolerates a non-string timestamp, returning None (IMP-4)."""
+        assert cc_parse_iso(1700000000) is None
+        assert cc_parse_iso(None) is None
+        assert cc_parse_iso({"k": "v"}) is None
+
+    def test_parse_iso_valid_string(self):
+        """parse_iso still parses a valid ISO string."""
+        dt = cc_parse_iso("2026-02-18T10:00:00Z")
+        assert dt is not None
+        assert dt.year == 2026
+
+    def test_non_dict_message_conversation_only(self, tmp_path):
+        """A non-dict 'message' value does not crash conversation_only import (IMP-4)."""
+        events = [
+            _cc_event("user", uuid="u1",
+                      message={"role": "user", "content": "Hello"}),
+            # message is a string, not a dict
+            _cc_event("assistant", uuid="a1", parent_uuid="u1", message="oops"),
+            _cc_event("assistant", uuid="a2", parent_uuid="u1",
+                      message={"role": "assistant", "model": "claude-opus-4-6",
+                               "content": [{"type": "text", "text": "Hi!"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        convs = claude_code_import(str(f))
+        assert len(convs) == 1
+        # The bad assistant is skipped; user + good assistant remain.
+        assert len(convs[0].messages) == 2
+
+    def test_non_dict_message_full(self, tmp_path):
+        """A non-dict 'message' value does not crash full import (IMP-4)."""
+        events = [
+            _cc_event("user", uuid="u1",
+                      message={"role": "user", "content": "Hello"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1", message="oops"),
+            _cc_event("assistant", uuid="a2", parent_uuid="u1",
+                      message={"role": "assistant", "model": "claude-opus-4-6",
+                               "content": [{"type": "text", "text": "Hi!"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        convs = claude_code_full_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 2
+
+    def test_numeric_timestamp_conversation_only(self, tmp_path):
+        """A numeric timestamp does not crash conversation_only import (IMP-4)."""
+        events = [
+            _cc_event("user", uuid="u1", timestamp=1700000000,
+                      message={"role": "user", "content": "Hello"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1", timestamp=1700000001,
+                      message={"role": "assistant", "model": "claude-opus-4-6",
+                               "content": [{"type": "text", "text": "Hi!"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        convs = claude_code_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 2
+        # Numeric timestamp is not parseable as ISO, so created_at is None.
+        for msg in convs[0].messages.values():
+            assert msg.created_at is None
+
+
+# IMP-5: Claude Code common file reading tolerates non-UTF8 bytes
+
+class TestClaudeCodeNonUtf8:
+    def test_parse_records_tolerates_non_utf8(self, tmp_path):
+        """A non-UTF8 byte in the JSONL file is tolerated, valid lines still parse (IMP-5)."""
+        events = [
+            _cc_event("user", uuid="u1",
+                      message={"role": "user", "content": "Hello"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1",
+                      message={"role": "assistant", "model": "claude-opus-4-6",
+                               "content": [{"type": "text", "text": "Hi!"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        good = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+        # Inject an invalid UTF-8 byte (0xff) on its own corrupt line.
+        f.write_bytes(good + b"\n" + b"\xff\xfe garbage line\n")
+        convs = claude_code_import(str(f))
+        assert len(convs) == 1
+        assert len(convs[0].messages) == 2
+
+    def test_detect_file_tolerates_non_utf8(self, tmp_path):
+        """detect_file tolerates a non-UTF8 byte and still detects a valid session (IMP-5)."""
+        events = [_cc_event("user", uuid="u1",
+                            message={"role": "user", "content": "Hello"})]
+        f = tmp_path / "session.jsonl"
+        good = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+        f.write_bytes(good + b"\n" + b"\xff\xfe garbage\n")
+        assert claude_code_detect(str(f)) is True

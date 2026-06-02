@@ -10,6 +10,7 @@ the file extension of ``path``. All three layouts contain the same files:
 Compression choice prioritizes longevity: ``.zip`` and ``.tar.gz`` are both
 ubiquitous (every OS and scripting language has supported them for 30+ years).
 """
+import gzip
 import io
 import json
 import os
@@ -98,16 +99,33 @@ def _write_zip(
 def _write_tar_gz(
     path: str, jsonl: bytes, schema_yaml: bytes, readme: bytes
 ) -> None:
-    """Write the three bundle files into a single .tar.gz archive."""
-    with tarfile.open(path, "w:gz") as tf:
-        for name, data in (
-            ("conversations.jsonl", jsonl),
-            ("schema.yaml", schema_yaml),
-            ("README.md", readme),
-        ):
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
+    """Write the three bundle files into a single .tar.gz archive.
+
+    The output is byte-reproducible: ``tarfile.open(path, "w:gz")`` would stamp
+    the current wall-clock time into the gzip header, so two exports of
+    identical data would differ. We instead drive a ``gzip.GzipFile`` with
+    ``mtime=0`` (fixed gzip header) and set every ``TarInfo.mtime`` to 0 (fixed
+    per-member timestamps), making the bundle deterministic. The .zip path is
+    already deterministic (zipfile uses a fixed default date), so this brings
+    .tar.gz to parity.
+    """
+    with open(path, "wb") as raw:
+        # mtime=0 zeroes the timestamp field in the gzip header. filename=""
+        # suppresses the FNAME field, which GzipFile would otherwise populate
+        # from ``raw.name`` (the output path), leaking the file name into the
+        # header and breaking byte-reproducibility across differently-named
+        # outputs of identical data.
+        with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tf:
+                for name, data in (
+                    ("conversations.jsonl", jsonl),
+                    ("schema.yaml", schema_yaml),
+                    ("README.md", readme),
+                ):
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    info.mtime = 0  # fixed per-member timestamp
+                    tf.addfile(info, io.BytesIO(data))
 
 
 def _build_records(
@@ -186,7 +204,19 @@ def _compute_schema(
         meta = rec.get("metadata", {})
         for key, value in meta.items():
             if key not in key_stats:
-                key_stats[key] = {"type": _json_type(value), "count": 0, "values": set()}
+                # ``first_example`` captures the first real (raw, JSON-
+                # serializable) value seen for this key, in record order. When
+                # a key crosses the >20-unique cap we emit this deterministic
+                # value rather than pulling an arbitrary element out of a set
+                # (set iteration order depends on PYTHONHASHSEED, which would
+                # break byte-stability of schema.yaml, and ``str()`` of a
+                # hashed list/dict yields tuple-repr / sorted-JSON garbage).
+                key_stats[key] = {
+                    "type": _json_type(value),
+                    "count": 0,
+                    "values": set(),
+                    "first_example": value,
+                }
             key_stats[key]["count"] += 1
             # Track unique values (cap collection at 21 to know if >20)
             vals = key_stats[key]["values"]
@@ -201,8 +231,9 @@ def _compute_schema(
         if isinstance(vals, set) and len(vals) <= 20:
             entry["values"] = sorted(str(v) for v in vals)
         else:
-            # Pick the first value we collected as an example
-            entry["example"] = str(next(iter(vals))) if vals else ""
+            # >20 unique values: emit the deterministic first real value
+            # (faithful and JSON-serializable), not an arbitrary set element.
+            entry["example"] = stats["first_example"]
         result[key] = entry
     return result
 

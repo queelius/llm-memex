@@ -2,14 +2,22 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import glob
+import logging
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from llm_memex.models import Conversation
+
+logger = logging.getLogger(__name__)
+
+# Characters permitted in a derived file extension (after the leading dot).
+# Same alphanumeric-plus-limited-punctuation whitelist used to sanitize names.
+_EXT_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 # ── Media type helpers ──────────────────────────────────────────
@@ -55,13 +63,25 @@ def _media_type_from_path(path: Path) -> str | None:
 
 
 def _media_type_to_ext(media_type: str) -> str:
-    """Map a MIME type to a file extension."""
+    """Map a MIME type to a file extension.
+
+    ``media_type`` is attacker-controlled (it comes straight from an export),
+    so any extension derived from its subtype is validated against an
+    alphanumeric-plus-limited-punctuation whitelist. A subtype containing
+    shell metacharacters, spaces, slashes, path-traversal dots, or anything
+    else outside the whitelist falls back to ".bin" rather than leaking junk
+    into the on-disk filename (MCA-6).
+    """
     if media_type in _EXT_MAP:
         return _EXT_MAP[media_type]
-    # Fallback: use subtype (e.g. "image/tiff" -> ".tiff")
+    # Fallback: use subtype (e.g. "image/tiff" -> ".tiff"), but only if it is
+    # composed entirely of whitelisted characters and is not a bare-dots
+    # traversal token (e.g. "x/.." must not become "..").
     parts = media_type.split("/")
     if len(parts) == 2:
-        return f".{parts[1]}"
+        subtype = parts[1]
+        if subtype and all(c in _EXT_ALLOWED for c in subtype) and subtype.strip(".") != "":
+            return f".{subtype}"
     return ".bin"
 
 
@@ -201,17 +221,34 @@ def copy_assets(conv: Conversation, asset_dir: Path) -> int:
                 dest = _collision_rename(asset_dir / filename)
                 shutil.copy2(str(src), str(dest))
                 block["url"] = f"assets/{dest.name}"
+                # Drop any co-present stale base64 so it does not re-serialize,
+                # for consistency with the base64 branch below.
+                block.pop("data", None)
                 count += 1
                 continue
 
             # Case 2: base64 data with no usable file URL
             data = block.get("data")
             if data:
+                # media_type is attacker-controlled and the base64 payload may
+                # be malformed (e.g. "Incorrect padding"). Decode with
+                # validate=False (consistent, default behaviour) but never let
+                # a single bad block abort the whole import loop (MCA-1): log
+                # and skip, leaving the block's data intact for later recovery.
+                try:
+                    decoded = base64.b64decode(data)
+                except (binascii.Error, ValueError) as exc:
+                    logger.warning(
+                        "Skipping media block with malformed base64 "
+                        "(msg %s, block %d): %s",
+                        msg.id, i, exc,
+                    )
+                    continue
                 filename = _safe_filename(
                     block.get("filename"), msg.id, i, media_type
                 )
                 dest = _collision_rename(asset_dir / filename)
-                dest.write_bytes(base64.b64decode(data))
+                dest.write_bytes(decoded)
                 block["url"] = f"assets/{dest.name}"
                 del block["data"]
                 count += 1

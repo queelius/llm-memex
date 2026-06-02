@@ -406,3 +406,96 @@ class TestNotesRoundTrip:
         assert len(annotated) == 1
         notes = annotated[0].metadata["_arkiv_notes"]
         assert any("Revisit for the paper" in (n.get("text") or "") for n in notes)
+
+
+# ── IMP-9: malformed tar member must not abort detection ───────
+
+class TestTarGzMalformedDetect:
+    def _make_malformed_tar_gz(self, path: Path) -> None:
+        """Craft a .tar.gz whose conversations.jsonl member is a symlink with
+        an unresolvable linkname. tarfile.extractfile() raises KeyError (not a
+        TarError) for such a member; detect() must catch it and return False
+        rather than letting the exception abort auto-detection."""
+        with tarfile.open(path, "w:gz") as tf:
+            info = tarfile.TarInfo(name="conversations.jsonl")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "does/not/exist/anywhere.jsonl"
+            info.size = 0
+            tf.addfile(info)
+
+    def test_detect_returns_false_not_raises_on_symlink_member(self, tmp_path):
+        target = tmp_path / "evil.tar.gz"
+        self._make_malformed_tar_gz(target)
+        # Must NOT raise (KeyError from extractfile would abort the whole
+        # auto-detection sweep); must return False instead.
+        assert arkiv_detect(str(target)) is False
+
+
+# ── EXP-2: schema example must be deterministic + faithful ─────
+
+class TestSchemaExampleDeterminism:
+    def _records_with_capped_list_key(self):
+        """Build >20 records whose metadata carries a list-valued key ('tags')
+        with >20 distinct values, forcing the >20-unique 'example' branch."""
+        from llm_memex.exporters.arkiv_export import _build_records
+
+        convs = []
+        for i in range(25):
+            now = datetime(2026, 4, 22, 9, 0, 0)
+            conv = Conversation(
+                id=f"conv-{i}",
+                created_at=now,
+                updated_at=now,
+                title=f"title-{i}",
+                source="openai",
+                model="gpt-4o",
+                tags=[f"tag-{i}-a", f"tag-{i}-b"],
+            )
+            conv.add_message(Message(
+                id=f"m-{i}", role="user",
+                content=[text_block(f"hello {i}")],
+                created_at=now,
+            ))
+            convs.append(conv)
+        return _build_records(convs)
+
+    def test_schema_example_is_deterministic_across_runs(self):
+        from llm_memex.exporters.arkiv_export import _compute_schema
+
+        records = self._records_with_capped_list_key()
+        s1 = _compute_schema(records)
+        s2 = _compute_schema(records)
+        # 'tags' has >20 unique list values -> uses 'example', not 'values'.
+        assert "example" in s1["tags"]
+        assert "values" not in s1["tags"]
+        # Deterministic across two independent computations.
+        assert s1["tags"]["example"] == s2["tags"]["example"]
+
+    def test_schema_example_is_faithful_not_tuple_repr(self):
+        from llm_memex.exporters.arkiv_export import _compute_schema
+
+        records = self._records_with_capped_list_key()
+        schema = _compute_schema(records)
+        example = schema["tags"]["example"]
+        # A faithful JSON-serializable value (the first real tags list),
+        # NOT Python tuple-repr garbage like "('tag-0-a', 'tag-0-b')".
+        assert example == ["tag-0-a", "tag-0-b"]
+        json.dumps(example)  # must be JSON-serializable, raises otherwise
+
+
+# ── EXP-3: tar.gz export must be byte-reproducible ─────────────
+
+class TestTarGzReproducible:
+    def test_two_tar_gz_exports_are_byte_identical(self, tmp_path):
+        out1 = tmp_path / "a.tar.gz"
+        out2 = tmp_path / "b.tar.gz"
+        arkiv_export([_seed_conversation()], str(out1))
+        arkiv_export([_seed_conversation()], str(out2))
+        assert out1.read_bytes() == out2.read_bytes()
+
+    def test_reproducible_tar_gz_still_imports(self, tmp_path):
+        out = tmp_path / "repro.tar.gz"
+        arkiv_export([_seed_conversation()], str(out))
+        convs = arkiv_import(str(out))
+        assert len(convs) == 1
+        assert convs[0].title == "Bernoulli sets and you"

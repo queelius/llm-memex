@@ -14,7 +14,8 @@ def detect(path: str) -> bool:
     if Path(path).is_dir():
         return False
     try:
-        with open(path) as f:
+        # utf-8-sig tolerates a leading BOM (otherwise json.load raises).
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(data, dict):
             if any(k in data for k in ("conversations", "turns", "conversation_id")):
@@ -37,13 +38,13 @@ def detect(path: str) -> bool:
             if "gemini" in sample or "bard" in sample:
                 return True
         return False
-    except (json.JSONDecodeError, IOError, KeyError, IndexError, ValueError):
+    except (json.JSONDecodeError, IOError, OSError, KeyError, IndexError, ValueError):
         return False
 
 
 def import_path(path: str) -> List[Conversation]:
     """Import conversations from a Gemini export file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     # Normalize to list of conversation dicts
     if isinstance(data, dict):
@@ -82,10 +83,16 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
         tags=["google", "gemini"],
     )
 
-    messages = data.get("turns", data.get("messages", []))
+    messages = data.get("turns")
+    if messages is None:
+        messages = data.get("messages") or []
+    if not isinstance(messages, list):
+        messages = []
     parent_id = None
 
     for idx, msg_data in enumerate(messages):
+        if not isinstance(msg_data, dict):
+            continue
         msg_id = msg_data.get("id", f"msg_{idx}")
         role_str = str(msg_data.get("author", msg_data.get("role", "user")))
         role = "assistant" if role_str.lower() in ("model", "gemini", "bard") else "user"
@@ -116,9 +123,11 @@ def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
     """Extract content blocks from a Gemini message."""
     blocks: List[Dict[str, Any]] = []
 
-    # Gemini uses "parts" for multimodal content
-    if "parts" in msg_data:
-        for part in msg_data["parts"]:
+    # Gemini uses "parts" for multimodal content. A non-list "parts" (e.g. a
+    # plain string) must not be iterated character-by-character.
+    parts = msg_data.get("parts")
+    if isinstance(parts, list):
+        for part in parts:
             if isinstance(part, str):
                 blocks.append(text_block(part))
             elif isinstance(part, dict):

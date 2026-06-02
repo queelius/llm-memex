@@ -5,6 +5,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
@@ -189,8 +190,18 @@ def run(db, args, apply=False):
         return stats
 
     if args.yes:
+        failed = []
         for result in pending:
-            _apply_single(db, result, args.level)
+            try:
+                _apply_single(db, result, args.level)
+            except Exception as exc:  # noqa: BLE001 - surface, don't abort batch
+                # Per-item failure must not abort the whole batch (REDACT-4).
+                # The failed item's writes are atomic, so nothing is half-applied.
+                failed.append(result.conversation_id)
+                print(f"  [FAILED] conv {result.conversation_id}: {exc}")
+        if failed:
+            stats["failed"] = failed
+            print(f"\n{len(failed)} conversation(s) failed: {', '.join(failed)}")
     else:
         interactive_stats = interactive_review(pending, db, args.level)
         stats.update(interactive_stats)
@@ -332,23 +343,60 @@ def _redact_conversation_fields(db, matchers):
     return updated
 
 
+def _stage_original_content_enrichment(db, conversation_id, message_id, content):
+    """Stage (without committing) an `original_content` enrichment holding the
+    pre-redaction content.
+
+    Intentionally writes to ``db.conn`` WITHOUT a commit so it shares a single
+    transaction with the subsequent ``update_message_content``. The commit (or
+    rollback) inside ``update_message_content`` then flushes (or discards) this
+    enrichment together with the message change, making the pair atomic
+    (REDACT-4). A crash/raise between them can never leave a committed plaintext
+    enrichment beside an un-redacted message.
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.conn.execute(
+        "INSERT OR REPLACE INTO enrichments "
+        "(conversation_id,type,value,source,confidence,created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (
+            conversation_id,
+            "original_content",
+            json.dumps({"message_id": message_id, "content": content}),
+            "redact",
+            None,
+            now,
+        ),
+    )
+
+
 def _apply_single(db, result, level):
-    """Apply a single redaction action to the database."""
-    if level == "word":
-        new_content = redact_word_level(result.content, result.matches)
-        db.save_enrichment(
-            result.conversation_id, "original_content",
-            json.dumps({"message_id": result.message_id, "content": result.content}),
-            "redact")
-        db.update_message_content(result.conversation_id, result.message_id,
-                                  new_content)
-    elif level == "message":
-        db.save_enrichment(
-            result.conversation_id, "original_content",
-            json.dumps({"message_id": result.message_id, "content": result.content}),
-            "redact")
-        db.update_message_content(result.conversation_id, result.message_id,
-                                  redact_message_level())
+    """Apply a single redaction action to the database.
+
+    For word/message levels the original-content enrichment and the message
+    update are committed as ONE transaction (see
+    ``_stage_original_content_enrichment``): both apply or neither does.
+    """
+    if level in ("word", "message"):
+        if level == "word":
+            new_content = redact_word_level(result.content, result.matches)
+        else:
+            new_content = redact_message_level()
+        # Single transaction: stage the original-content enrichment (no commit),
+        # then update the message. update_message_content commits, flushing both
+        # atomically. If anything raises, roll back so the staged enrichment is
+        # discarded too: never a committed plaintext enrichment beside an
+        # un-redacted message (REDACT-4). We own the rollback here rather than
+        # relying on update_message_content's internal rollback, so atomicity
+        # holds no matter where the failure originates.
+        try:
+            _stage_original_content_enrichment(
+                db, result.conversation_id, result.message_id, result.content)
+            db.update_message_content(result.conversation_id, result.message_id,
+                                      new_content)
+        except Exception:
+            db.conn.rollback()
+            raise
     elif level == "conversation":
         db.delete_conversation(result.conversation_id)
 

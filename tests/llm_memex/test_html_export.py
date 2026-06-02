@@ -589,6 +589,48 @@ class TestXssSafety:
         assert 'rel="noopener noreferrer"' in html
         assert 'target="_blank">' not in html
 
+    def test_schema_ddl_cannot_break_out_of_script(self):
+        """schema_ddl is embedded inside an inline <script>. The HTML tokenizer
+        terminates a <script> at the first literal </script> regardless of JS
+        quoting, so a schema_ddl carrying </script> (a view/trigger/index name
+        or body) would break out into live markup (EXP-1). The closing-tag
+        sequence must be neutralized so no literal </script> originates from
+        the schema_ddl.
+        """
+        # A malicious/unlucky schema_ddl that closes the script element and
+        # injects markup. The raw closing-tag sequence must NOT survive.
+        evil = "x </script><img src=x onerror=alert(1)> y"
+        html = get_template(schema_ddl=evil)
+        # The exact injected markup must not appear verbatim.
+        assert "</script><img src=x onerror=alert(1)>" not in html
+        # No literal </script> may originate from the schema_ddl. The document
+        # has exactly one legitimate </script> for the inline chat module plus
+        # one for the sql-wasm.js loader script; the schema_ddl must contribute
+        # none. Locate the SCHEMA_DDL assignment and assert no </script> appears
+        # between it and the end of that JS string literal.
+        marker = "var SCHEMA_DDL = '"
+        idx = html.index(marker)
+        # The schema string literal ends at the next "';\n" terminator.
+        end = html.index("';\n", idx)
+        ddl_region = html[idx:end]
+        assert "</script>" not in ddl_region
+        # The neutralized form (escaped slash) is what should be present.
+        assert "<\\/script>" in ddl_region
+
+    def test_schema_ddl_normal_still_embeds(self):
+        """Neutralizing the closing-tag sequence must not corrupt normal schema
+        DDL: the chat feature must still receive the schema text (EXP-1).
+        """
+        ddl = "CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT);"
+        html = get_template(schema_ddl=ddl)
+        # A normal DDL has no "</", so it embeds byte-for-byte.
+        assert ddl in html
+        # And it lands inside the SCHEMA_DDL JS string literal.
+        marker = "var SCHEMA_DDL = '"
+        idx = html.index(marker)
+        end = html.index("';\n", idx)
+        assert ddl in html[idx:end]
+
 
 class TestSpaArkivExport:
     """The SPA can export its current state as arkiv .jsonl.gz for round-tripping

@@ -21,13 +21,16 @@ def detect(path: str) -> bool:
     if Path(path).is_dir():
         return False
     try:
-        with open(path) as f:
+        # utf-8-sig tolerates a leading BOM (otherwise json.load raises).
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(data, list) and data:
             sample = data[0]
         elif isinstance(data, dict):
             sample = data
         else:
+            return False
+        if not isinstance(sample, dict):
             return False
         # Primary: chat_messages field
         if "chat_messages" in sample:
@@ -36,13 +39,13 @@ def detect(path: str) -> bool:
         if "uuid" in sample and "name" in sample:
             return True
         return False
-    except (json.JSONDecodeError, IOError, KeyError, IndexError, ValueError):
+    except (json.JSONDecodeError, IOError, OSError, KeyError, IndexError, ValueError):
         return False
 
 
 def import_path(path: str) -> List[Conversation]:
     """Import conversations from an Anthropic export file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     if not isinstance(data, list):
         data = [data]
@@ -72,10 +75,16 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
         tags=["anthropic", "claude"],
     )
 
-    messages = data.get("chat_messages", data.get("messages", []))
+    messages = data.get("chat_messages")
+    if messages is None:
+        messages = data.get("messages") or []
+    if not isinstance(messages, list):
+        messages = []
     parent_id = None
 
     for idx, msg_data in enumerate(messages):
+        if not isinstance(msg_data, dict):
+            continue
         msg_id = msg_data.get("uuid") or msg_data.get("id", f"msg_{idx}")
         sender = msg_data.get("sender", msg_data.get("role", "user"))
         role = "assistant" if sender in ("assistant", "model") else "user"

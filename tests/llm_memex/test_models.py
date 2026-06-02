@@ -61,6 +61,65 @@ class TestMessage:
     def test_get_text_empty(self):
         assert Message(id="m1", role="user", content=[]).get_text() == ""
 
+    def test_get_text_coerces_non_str_text(self):
+        """A malformed import may carry a non-str text (e.g. an int). get_text must
+        not raise TypeError on the str-join; it coerces to str instead."""
+        msg = Message(id="m1", role="user", content=[
+            {"type": "text", "text": 42}, text_block("ok"),
+        ])
+        assert msg.get_text() == "42\nok"
+
+
+class TestRenderMediaMd:
+    def test_javascript_url_not_emitted_as_link(self):
+        """A javascript: media url must never become a clickable markdown link."""
+        from llm_memex.models import _render_media_md
+        rendered = _render_media_md({
+            "type": "media", "media_type": "image/png",
+            "url": "javascript:alert(1)", "filename": "evil.png",
+        })
+        assert "javascript:alert(1)" not in rendered
+        assert "](" not in rendered  # no markdown link/image target at all
+        assert "evil.png" in rendered  # plain-text label is preserved
+
+    def test_data_html_url_not_emitted_as_link(self):
+        """A data:text/html payload must not be smuggled through as a link target."""
+        from llm_memex.models import _render_media_md
+        rendered = _render_media_md({
+            "type": "media", "media_type": "text/html",
+            "url": "data:text/html;base64,PHNjcmlwdD4=", "filename": "x.html",
+        })
+        assert "data:text/html" not in rendered
+        assert "](" not in rendered
+
+    def test_normal_https_image_renders_link(self):
+        """A valid https image url still renders the standard markdown image."""
+        from llm_memex.models import _render_media_md
+        rendered = _render_media_md({
+            "type": "media", "media_type": "image/png",
+            "url": "https://example.com/img.png", "filename": "img.png",
+        })
+        assert rendered == "![img.png](https://example.com/img.png)"
+
+    def test_data_image_renders_link(self):
+        """A data:image base64 block still renders as an inline image."""
+        from llm_memex.models import _render_media_md
+        rendered = _render_media_md({
+            "type": "media", "media_type": "image/png", "data": "QUJD",
+        })
+        assert rendered == "![image](data:image/png;base64,QUJD)"
+
+    def test_content_md_drops_unsafe_media_link(self):
+        """get_content_md (markdown exporter surface) must not emit a javascript: link."""
+        msg = Message(id="m1", role="user", content=[
+            text_block("see attachment"),
+            {"type": "media", "media_type": "image/png",
+             "url": "javascript:alert(1)", "filename": "evil.png"},
+        ])
+        md = msg.get_content_md()
+        assert "javascript:" not in md
+        assert "](" not in md
+
 class TestConversation:
     def _linear(self):
         now = datetime.now()

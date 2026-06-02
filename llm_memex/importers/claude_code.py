@@ -60,7 +60,9 @@ def _import_single(path: str) -> List[Conversation]:
         if rec.get("isSidechain"):
             continue
 
-        msg = rec.get("message", {})
+        msg = rec.get("message") or {}
+        if not isinstance(msg, dict):
+            msg = {}
 
         if event_type == "user" and rec.get("userType") == "external":
             content = msg.get("content")

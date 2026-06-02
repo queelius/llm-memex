@@ -112,7 +112,9 @@ def _import_single(path: str, ignore_sidechain: bool = False) -> List[Conversati
         if not ignore_sidechain and rec.get("isSidechain"):
             continue
 
-        msg = rec.get("message", {})
+        msg = rec.get("message") or {}
+        if not isinstance(msg, dict):
+            msg = {}
 
         if event_type == "user":
             content = msg.get("content")
