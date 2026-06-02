@@ -22,6 +22,15 @@ def get_template(schema_ddl: str = "") -> str:
         '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        # Defense-in-depth CSP. script-src is intentionally NOT restricted: this
+        # bundle is meant to open offline via file://, where an opaque origin
+        # would not match 'self', so the sibling sql-wasm.js, inline scripts,
+        # and wasm would all be blocked. We instead lock down the vectors that
+        # touch no resource the app loads: plugins, base-tag hijacking, framing,
+        # and form submission.
+        '<meta http-equiv="Content-Security-Policy" '
+        'content="object-src \'none\'; base-uri \'none\'; '
+        'frame-ancestors \'none\'; form-action \'none\'">\n'
         '<title>memex</title>\n'
         '<style>\n'
         + _css_variables()

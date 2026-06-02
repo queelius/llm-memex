@@ -1140,3 +1140,26 @@ class TestCLIHelp:
         )
         assert result.returncode == 0
         assert "usage:" in result.stdout.lower() or "llm-memex" in result.stdout.lower()
+
+
+class TestCliConfigCache:
+    def test_load_cli_config_is_env_aware(self, tmp_path, monkeypatch):
+        """_load_cli_config must not serve a stale config after MEMEX_CONFIG
+        changes within the process (ARCH-7)."""
+        from llm_memex import cli
+        if hasattr(cli._load_cli_config, "_cache"):
+            del cli._load_cli_config._cache
+        try:
+            a = tmp_path / "a.yaml"
+            a.write_text("primary: aaa\ndatabases: {aaa: {path: /tmp/a}}\n")
+            b = tmp_path / "b.yaml"
+            b.write_text("primary: bbb\ndatabases: {bbb: {path: /tmp/b}}\n")
+            monkeypatch.setenv("MEMEX_CONFIG", str(a))
+            cfg_a = cli._load_cli_config()
+            monkeypatch.setenv("MEMEX_CONFIG", str(b))
+            cfg_b = cli._load_cli_config()
+            assert cfg_a["primary"] == "aaa"
+            assert cfg_b["primary"] == "bbb"
+        finally:
+            if hasattr(cli._load_cli_config, "_cache"):
+                del cli._load_cli_config._cache

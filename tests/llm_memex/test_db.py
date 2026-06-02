@@ -1140,3 +1140,65 @@ class TestReimportIntegrity:
         row = db2.conn.execute("SELECT version FROM schema_version").fetchone()
         db2.close()
         assert row is not None and row["version"] == SCHEMA_VERSION
+
+
+class TestMergeAndSchema:
+    def test_merge_recomputes_count_with_non_advancing_timestamp(self, tmp_db_path):
+        """merge_conversation must recompute message_count even when the merged
+        message's timestamp does not advance updated_at (DB-3)."""
+        db = Database(tmp_db_path)
+        t5 = datetime(2026, 1, 1, 12, 0, 5)
+        conv = Conversation(id="c1", created_at=t5, updated_at=t5, title="T", source="test")
+        conv.add_message(Message(id="m1", role="user", content=[text_block("a")], created_at=t5))
+        db.save_conversation(conv)
+        # Merge an OLDER message: it must not push updated_at forward, but
+        # message_count must still be recomputed.
+        older = Conversation(id="c1", created_at=t5, updated_at=t5, title="T", source="test")
+        older.add_message(Message(id="m0", role="user", content=[text_block("b")],
+                                  created_at=datetime(2026, 1, 1, 12, 0, 0)))
+        stats = db.merge_conversation(older)
+        actual = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE conversation_id='c1'"
+        ).fetchone()["n"]
+        stored = db.conn.execute(
+            "SELECT message_count FROM conversations WHERE id='c1'"
+        ).fetchone()["message_count"]
+        db.close()
+        assert stats["added_messages"] == 1
+        assert actual == 2
+        assert stored == 2
+
+    def test_get_schema_hides_notes_fts_shadow_tables(self, tmp_db_path):
+        """get_schema must hide notes_fts_* shadow tables, not only messages_fts_* (ARCH-2)."""
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        db.add_note(conversation_id="c1", text="a note")
+        schema = db.get_schema()
+        db.close()
+        assert "notes_fts_data" not in schema
+        assert "notes_fts_idx" not in schema
+        assert "messages_fts_data" not in schema
+        # The FTS5 virtual tables themselves are still documented.
+        assert "messages_fts" in schema
+        assert "notes_fts" in schema
+
+    def test_query_conversations_fts_no_silent_cap(self, tmp_db_path):
+        """An FTS query must not silently drop matches past an internal row cap:
+        with >1000 matches, the newest matching conversation must still be
+        returned (ARCH-1). The old code capped the FTS pre-filter at 1000 rows
+        by rowid, dropping the most-recent conversation."""
+        from datetime import timedelta
+        db = Database(tmp_db_path)
+        base = datetime(2026, 1, 1, 0, 0, 0)
+        for i in range(1001):
+            t = base + timedelta(minutes=i)  # strictly increasing: i=1000 is newest
+            conv = Conversation(id=f"c{i:04d}", created_at=t, updated_at=t,
+                                title=f"chat {i}", source="test")
+            conv.add_message(Message(id="m1", role="user",
+                                     content=[text_block("needle here")], created_at=t))
+            db.save_conversation(conv)
+        res = db.query_conversations(query="needle", limit=5)
+        ids = [it["id"] for it in res["items"]]
+        db.close()
+        assert "c1000" in ids
+        assert ids[0] == "c1000"

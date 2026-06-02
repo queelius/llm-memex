@@ -9,12 +9,16 @@ from pathlib import Path
 
 
 def _load_cli_config():
-    """Load config for CLI commands. Cached after first call."""
-    if not hasattr(_load_cli_config, "_cache"):
+    """Load config for CLI commands. Cached per resolved config path so a
+    MEMEX_CONFIG change within the process is not served a stale config."""
+    config_path = os.environ.get(
+        "MEMEX_CONFIG", os.path.expanduser("~/.memex/config.yaml")
+    )
+    cache = getattr(_load_cli_config, "_cache", None)
+    if cache is None or cache[0] != config_path:
         from llm_memex.config import load_config
-        config_path = os.environ.get("MEMEX_CONFIG", os.path.expanduser("~/.memex/config.yaml"))
-        _load_cli_config._cache = load_config(config_path)
-    return _load_cli_config._cache
+        _load_cli_config._cache = (config_path, load_config(config_path))
+    return _load_cli_config._cache[1]
 
 
 def _resolve_db_path(name_or_path: str) -> str:

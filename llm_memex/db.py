@@ -570,21 +570,34 @@ class Database:
                 pass
             self.conn = None
 
-    def execute_sql(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    def execute_sql(self, sql: str, params: tuple = (),
+                    max_rows: Optional[int] = None) -> List[Dict[str, Any]]:
         cursor = self.conn.execute(sql, params)
         if cursor.description is None:
             self.conn.commit()
             return []
+        if max_rows is not None:
+            # Bounded fetch: stops after max_rows rows instead of materializing
+            # an unbounded result set in memory.
+            return cursor.fetchmany(max_rows)
         return cursor.fetchall()
 
     def get_schema(self) -> str:
         # Filter out FTS5 internal tables (shadow tables) -- they're
         # implementation details that confuse LLMs trying to write SQL.
-        skip_prefixes = ("messages_fts_", "schema_version")
         rows = self.execute_sql(
-            "SELECT name, sql FROM sqlite_master "
+            "SELECT name, sql, type FROM sqlite_master "
             "WHERE sql IS NOT NULL ORDER BY type, name"
         )
+        # Derive shadow-table prefixes structurally from every FTS5 virtual
+        # table (e.g. messages_fts -> "messages_fts_"), so adding a new FTS5
+        # table later cannot reintroduce a leak. The virtual tables themselves
+        # do not match their own "<name>_" prefix, so their DDL is kept.
+        fts_prefixes = tuple(
+            r["name"] + "_" for r in rows
+            if r["type"] == "table" and "using fts5" in (r["sql"] or "").lower()
+        )
+        skip_prefixes = fts_prefixes + ("schema_version",)
         ddl = "\n\n".join(
             r["sql"] for r in rows
             if not any(r["name"].startswith(p) for p in skip_prefixes)
@@ -770,21 +783,26 @@ class Database:
                     stats["added_tags"] += 1
 
             if stats["added_messages"]:
-                # Recompute message_count + push updated_at forward.
+                # Always recompute the denormalized count when messages were
+                # added. This must NOT be coupled to the updated_at guard below:
+                # a merged message with a NULL or non-increasing created_at would
+                # otherwise leave message_count stale (and feed a wrong
+                # conversation_unchanged skip decision on later imports).
                 c.execute(
-                    "UPDATE conversations SET "
-                    "  message_count = (SELECT COUNT(*) FROM messages "
-                    "                   WHERE conversation_id=?), "
-                    "  updated_at = ("
-                    "    SELECT MAX(created_at) FROM messages "
-                    "    WHERE conversation_id=?"
-                    "  ) "
+                    "UPDATE conversations SET message_count = "
+                    "(SELECT COUNT(*) FROM messages WHERE conversation_id=?) "
+                    "WHERE id=?",
+                    (conv.id, conv.id),
+                )
+                # Move updated_at forward only (never backward).
+                c.execute(
+                    "UPDATE conversations SET updated_at = "
+                    "  (SELECT MAX(created_at) FROM messages WHERE conversation_id=?) "
                     "WHERE id=? AND ("
                     "  updated_at IS NULL OR updated_at < "
-                    "    (SELECT MAX(created_at) FROM messages "
-                    "     WHERE conversation_id=?)"
+                    "    (SELECT MAX(created_at) FROM messages WHERE conversation_id=?)"
                     ")",
-                    (conv.id, conv.id, conv.id, conv.id),
+                    (conv.id, conv.id, conv.id),
                 )
 
             self.conn.commit()
@@ -919,13 +937,18 @@ class Database:
         conds: List[str] = []
         params: List[Any] = []
         if query:
-            fts_ids = self._fts_search(query)
-            if not fts_ids:
+            fts_q = _sanitize_fts_query(query)
+            if not fts_q:
                 return {"items": [], "next_cursor": None, "has_more": False}
+            # Use a correlated subquery rather than materializing matching ids:
+            # this applies the final ORDER BY + LIMIT across ALL matches (no
+            # silent row cap) and avoids a host-parameter explosion when many
+            # conversations match.
             conds.append(
-                f"c.id IN ({','.join('?' for _ in fts_ids)})"
+                "c.id IN (SELECT DISTINCT conversation_id FROM messages_fts "
+                "WHERE messages_fts MATCH ?)"
             )
-            params.extend(fts_ids)
+            params.append(fts_q)
         if title:
             conds.append("c.title LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(title)}%")

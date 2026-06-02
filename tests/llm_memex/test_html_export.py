@@ -631,6 +631,25 @@ class TestXssSafety:
         end = html.index("';\n", idx)
         assert ddl in html[idx:end]
 
+    def test_csp_meta_present(self):
+        """A Content-Security-Policy meta hardens object/base/frame/form vectors
+        (HTML-3). script-src is intentionally left unrestricted so the offline
+        file:// bundle keeps loading its sibling sql-wasm.js."""
+        html = get_template()
+        assert 'http-equiv="Content-Security-Policy"' in html
+        assert "object-src 'none'" in html
+        assert "base-uri 'none'" in html
+        assert "frame-ancestors 'none'" in html
+
+
+class TestVendoredAssets:
+    def test_vendored_sqljs_files_present(self):
+        """The vendored sql.js files must ship in the package (no CDN fallback);
+        a packaging regression that drops them would silently break the SPA (ARCH-8)."""
+        from llm_memex.exporters import html as html_mod
+        for fname in html_mod._SQL_JS_FILES:
+            assert (html_mod._VENDORED_DIR / fname).exists(), fname
+
 
 class TestSpaArkivExport:
     """The SPA can export its current state as arkiv .jsonl.gz for round-tripping

@@ -25,6 +25,10 @@ classifiers = [
 dependencies = [
     "fastmcp<3",
     "pyyaml",
+    # mcp.py imports pydantic.Field directly. It arrives transitively via
+    # fastmcp today, but we depend on it explicitly so the import contract
+    # does not rely on a transitive dependency.
+    "pydantic",
 ]
 
 [project.optional-dependencies]

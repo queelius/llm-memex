@@ -643,3 +643,54 @@ class TestSqlSecurity:
                content=[{"type": "text", "text": "x"}])
 
 
+class TestSqlBoundsAndContract:
+    def test_get_conversations_search_no_silent_cap(self, tmp_db_path):
+        """get_conversations(search=...) must not silently cap the FTS pre-filter
+        at 1000 rows and drop the newest match (ARCH-1)."""
+        from datetime import timedelta
+        d = Database(tmp_db_path)
+        base = datetime(2026, 1, 1, 0, 0, 0)
+        for i in range(1001):
+            t = base + timedelta(minutes=i)  # i=1000 newest
+            conv = Conversation(id=f"c{i:04d}", created_at=t, updated_at=t,
+                                title=f"chat {i}", source="test")
+            conv.add_message(Message(id="m1", role="user",
+                                     content=[text_block("needle here")]))
+            # keep updated_at strictly increasing
+            conv.updated_at = t
+            d.save_conversation(conv)
+        server = create_server(db=d, sql_write=False)
+        fn = _get_tool_fn(server, "get_conversations")
+        rows = fn(search="needle", limit=5)
+        ids = [r["id"] for r in rows]
+        assert "c1000" in ids
+        assert ids[0] == "c1000"
+
+    def test_execute_sql_caps_huge_result(self, db):
+        """execute_sql must not materialize an unbounded result set; a query
+        exceeding the row cap is rejected with guidance (MCP-5)."""
+        from fastmcp.exceptions import ToolError
+        server = create_server(db=db, sql_write=False)
+        fn = _get_tool_fn(server, "execute_sql")
+        huge = ("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL "
+                "SELECT n+1 FROM r WHERE n < 20000) SELECT n FROM r")
+        with pytest.raises(ToolError):
+            fn(sql=huge)
+        # a small query still works
+        assert fn(sql="SELECT 1 AS x")[0]["x"] == 1
+
+    def test_unknown_db_name_raises_tool_error(self, monkeypatch):
+        """An unknown db name must surface as a clean ToolError, not a raw
+        ValueError, across the tools (ARCH-3)."""
+        from fastmcp.exceptions import ToolError
+        from llm_memex import mcp as mcp_mod
+
+        class FakeReg:
+            def get_db(self, name=None):
+                raise ValueError(f"Unknown database: {name}")
+
+        monkeypatch.setattr(mcp_mod, "_get_registry", lambda ctx: FakeReg())
+        with pytest.raises(ToolError):
+            mcp_mod._get_db_from_ctx(object(), object(), "does-not-exist")
+
+

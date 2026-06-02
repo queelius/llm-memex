@@ -97,11 +97,21 @@ def _get_registry(ctx) -> DatabaseRegistry | None:
         return None
 
 
+# Upper bound on rows execute_sql will return, so an unbounded query (e.g. a
+# cartesian product or a SELECT * over a huge table) cannot exhaust memory.
+_MAX_SQL_ROWS = 10000
+
+
 def _get_db_from_ctx(mcp, ctx, db_name=None):
     """Get database from either lifespan context or test injection."""
     registry = _get_registry(ctx)
     if registry is not None:
-        return registry.get_db(db_name)
+        try:
+            return registry.get_db(db_name)
+        except ValueError as e:
+            # An unknown db name is a caller error; surface it as the uniform
+            # ToolError contract, not a raw ValueError.
+            raise ToolError(str(e))
     return mcp._test_db
 
 
@@ -189,9 +199,17 @@ Starred/pinned (use IS NOT NULL for boolean timestamp columns):
 """
         database = _get_db_from_ctx(mcp, ctx, db)
         try:
-            return database.execute_sql(sql, tuple(params) if params else ())
+            rows = database.execute_sql(
+                sql, tuple(params) if params else (), max_rows=_MAX_SQL_ROWS + 1
+            )
         except Exception as e:
             raise _sql_error_to_tool_error(e, database.readonly)
+        if len(rows) > _MAX_SQL_ROWS:
+            raise ToolError(
+                f"Query returned more than {_MAX_SQL_ROWS} rows; add a LIMIT "
+                "clause to bound the result."
+            )
+        return rows
 
     @mcp.tool(annotations={"readOnlyHint": True})
     def get_conversation(
@@ -323,7 +341,9 @@ Examples:
             )
             params.append(tag)
 
-        # FTS search: find matching conversation IDs first
+        # FTS search via a correlated subquery: applies the final ORDER BY +
+        # LIMIT across ALL matches (no silent 1000-row cap that could drop the
+        # most-recent conversations) and avoids a host-parameter explosion.
         if search:
             from llm_memex.db import _sanitize_fts_query
             fts_q = _sanitize_fts_query(search)
@@ -331,20 +351,11 @@ Examples:
                 # Query sanitized to empty (only stop-words, punctuation, etc.)
                 # Return empty rather than silently ignoring the search filter.
                 return []
-            try:
-                fts_rows = database.execute_sql(
-                    "SELECT DISTINCT conversation_id FROM messages_fts "
-                    "WHERE messages_fts MATCH ? LIMIT 1000",
-                    (fts_q,),
-                )
-                fts_ids = [r["conversation_id"] for r in fts_rows]
-            except Exception:
-                fts_ids = []
-            if not fts_ids:
-                return []
-            placeholders = ",".join("?" for _ in fts_ids)
-            conds.append(f"c.id IN ({placeholders})")
-            params.extend(fts_ids)
+            conds.append(
+                "c.id IN (SELECT DISTINCT conversation_id FROM messages_fts "
+                "WHERE messages_fts MATCH ?)"
+            )
+            params.append(fts_q)
 
         where = " AND ".join(conds) if conds else "1=1"
         params.append(limit)
