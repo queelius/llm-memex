@@ -85,10 +85,41 @@ def load_pattern_file(path):
     ]
 
 
+# Keys whose values are structural metadata (not user/model text), skipped
+# when walking non-text blocks for secrets. A match in a tool name or id is
+# almost certainly coincidental, and rewriting it would corrupt the block.
+_STRUCTURAL_KEYS = {"type", "id", "name", "tool_use_id", "tool_name", "role", "model"}
+
+
+def _walk_strings(obj, skip_keys=_STRUCTURAL_KEYS):
+    """Yield every string leaf in a nested content block.
+
+    Used to find secrets hiding in tool_use ``input`` dicts, tool_result
+    ``content``, and thinking blocks — the places Claude Code sessions are
+    most likely to capture credentials (cat of a key file, a Bash command,
+    etc.). Skips structural keys so a coincidental match on a type/name
+    isn't reported.
+    """
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in skip_keys:
+                continue
+            yield from _walk_strings(v, skip_keys)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_strings(v, skip_keys)
+
+
 def scan_message(content, matchers, conversation_id, message_id):
     """Scan a message's content blocks for matcher hits.
 
-    Only scans text blocks; non-text blocks are ignored.
+    Text blocks yield precise offset matches (word-level redactable). Every
+    other block type (tool_use, tool_result, thinking, ...) is scanned via
+    its string leaves; a hit there is recorded as a *structural* match
+    (start=end=-1), which the apply path escalates to full message-level
+    redaction since precise in-place rewriting of structured JSON is unsafe.
     Returns a ScanResult with all matches found.
     """
     result = ScanResult(
@@ -98,19 +129,39 @@ def scan_message(content, matchers, conversation_id, message_id):
     )
 
     for block_idx, block in enumerate(content):
-        if not isinstance(block, dict) or block.get("type") != "text":
+        if not isinstance(block, dict):
             continue
-        text = block.get("text", "")
-        for regex, term in matchers:
-            for m in regex.finditer(text):
-                result.matches.append(Match(
-                    conversation_id=conversation_id,
-                    message_id=message_id,
-                    term=term,
-                    start=m.start(),
-                    end=m.end(),
-                    block_index=block_idx,
-                ))
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            for regex, term in matchers:
+                for m in regex.finditer(text):
+                    result.matches.append(Match(
+                        conversation_id=conversation_id,
+                        message_id=message_id,
+                        term=term,
+                        start=m.start(),
+                        end=m.end(),
+                        block_index=block_idx,
+                    ))
+        else:
+            # Non-text block: detect secrets in any string leaf. Record one
+            # structural match per term so the dry run is honest; the apply
+            # path redacts the whole message regardless of count.
+            seen_terms = set()
+            for s in _walk_strings(block):
+                for regex, term in matchers:
+                    if term in seen_terms:
+                        continue
+                    if regex.search(s):
+                        seen_terms.add(term)
+                        result.matches.append(Match(
+                            conversation_id=conversation_id,
+                            message_id=message_id,
+                            term=term,
+                            start=-1,
+                            end=-1,
+                            block_index=block_idx,
+                        ))
 
     return result
 
@@ -184,9 +235,17 @@ def run(db, args, apply=False):
                 ))
 
     stats = _compute_stats(pending, args.level)
+    note_hits = _scan_notes(db, matchers)
+    stats["notes_matched"] = len(note_hits)
 
     if not apply:
-        _print_dry_run(pending, args.level, stats)
+        if pending:
+            _print_dry_run(pending, args.level, stats)
+        if note_hits:
+            print(f"\n  [NOTE]  {len(note_hits)} marginalia note(s) contain matches "
+                  f"(scrubbed on --apply).")
+        if not pending and not note_hits:
+            print("No matches found.")
         return stats
 
     if args.yes:
@@ -209,6 +268,8 @@ def run(db, args, apply=False):
     # Scrub the denormalized title/summary fields too (they are exported by
     # every exporter), independent of which messages matched.
     stats["fields_redacted"] = _redact_conversation_fields(db, matchers)
+    # Scrub marginalia note text (also exported), FTS-safely.
+    stats["notes_redacted"] = _redact_notes(db, matchers)
 
     return stats
 
@@ -234,8 +295,13 @@ def _print_dry_run(pending, level, stats):
         conv_short = result.conversation_id[:12]
         if level == "word":
             for match in result.matches:
-                print(f"  [WORD]  conv {conv_short}... msg {result.message_id}: "
-                      f"matched '{match.term}' at {match.start}:{match.end}")
+                if match.start < 0:
+                    print(f"  [BLOCK] conv {conv_short}... msg {result.message_id}: "
+                          f"matched '{match.term}' in a non-text block "
+                          f"(tool/thinking) — whole message will be redacted")
+                else:
+                    print(f"  [WORD]  conv {conv_short}... msg {result.message_id}: "
+                          f"matched '{match.term}' at {match.start}:{match.end}")
         elif level == "message":
             terms = ", ".join(sorted({m.term for m in result.matches}))
             print(f"  [MSG]   conv {conv_short}... msg {result.message_id}: "
@@ -343,6 +409,40 @@ def _redact_conversation_fields(db, matchers):
     return updated
 
 
+def _scan_notes(db, matchers):
+    """Return the ids of marginalia notes whose text matches any matcher.
+
+    Returns [] on a pre-v4 schema (no notes table).
+    """
+    try:
+        rows = db.execute_sql("SELECT id, text FROM notes")
+    except Exception:  # noqa: BLE001 - missing table on old schemas
+        return []
+    return [
+        r["id"] for r in rows
+        if any(regex.search(r["text"] or "") for regex, _ in matchers)
+    ]
+
+
+def _redact_notes(db, matchers):
+    """Scrub matcher hits from marginalia note text. Returns count updated.
+
+    Notes travel in arkiv and HTML exports, so a secret in a note leaks just
+    like one in a message. Uses ``db.update_note`` so ``notes_fts`` stays in
+    sync — a direct UPDATE would drift the FTS index.
+    """
+    updated = 0
+    for note_id in _scan_notes(db, matchers):
+        row = db.execute_sql("SELECT text FROM notes WHERE id=?", (note_id,))
+        if not row:
+            continue
+        new_text, changed = redact_text(row[0]["text"], matchers)
+        if changed:
+            db.update_note(note_id, new_text)
+            updated += 1
+    return updated
+
+
 def _stage_original_content_enrichment(db, conversation_id, message_id, content):
     """Stage (without committing) an `original_content` enrichment holding the
     pre-redaction content.
@@ -378,10 +478,17 @@ def _apply_single(db, result, level):
     ``_stage_original_content_enrichment``): both apply or neither does.
     """
     if level in ("word", "message"):
-        if level == "word":
-            new_content = redact_word_level(result.content, result.matches)
-        else:
+        # A structural match (start < 0) means a secret sits inside a
+        # tool_use/tool_result/thinking block. We cannot safely rewrite
+        # arbitrary structured JSON in place, so escalate that message to
+        # full message-level redaction — the secret is guaranteed gone, and
+        # the pre-redaction content is preserved in the original_content
+        # enrichment for undo.
+        has_structural = any(m.start < 0 for m in result.matches)
+        if level == "message" or has_structural:
             new_content = redact_message_level()
+        else:
+            new_content = redact_word_level(result.content, result.matches)
         # Single transaction: stage the original-content enrichment (no commit),
         # then update the message. update_message_content commits, flushing both
         # atomically. If anything raises, roll back so the staged enrichment is
@@ -425,10 +532,15 @@ def interactive_review(pending, db, level, input_fn=None):
             reviewed_matches = list(approved_matches)
             quit_requested = False
             for m in unapproved:
-                text = result.content[m.block_index]["text"] if m.block_index < len(result.content) else ""
-                preview = text[max(0, m.start - 20):m.end + 20]
+                block = result.content[m.block_index] if m.block_index < len(result.content) else {}
+                if m.start < 0 or not (isinstance(block, dict) and block.get("type") == "text"):
+                    btype = block.get("type", "?") if isinstance(block, dict) else "?"
+                    preview = f"(match in {btype} block — whole message will be redacted)"
+                else:
+                    text = block.get("text", "")
+                    preview = "..." + text[max(0, m.start - 20):m.end + 20] + "..."
                 print(f"\n[{i+1}/{len(pending)}] conv {conv_short}... msg {result.message_id}:")
-                print(f"  ...{preview}...")
+                print(f"  {preview}")
                 choice = input_fn("  [r]edact  [s]kip  [a]ll  [q]uit\n> ").strip().lower()
                 if choice == "a":
                     auto_terms.add(m.term)

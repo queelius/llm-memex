@@ -1137,6 +1137,63 @@ class TestHtmlExporter:
         conn.close()
         assert n == 0 and leaked == 0, "redaction-undo plaintext leaked into the export"
 
+    def test_export_no_notes_drops_notes_table(self, tmp_path):
+        """--no-notes (include_notes=False) must drop the notes table so
+        private marginalia never ship in a published bundle (finding B5)."""
+        import sqlite3 as _sqlite3
+        from llm_memex.db import Database
+        from llm_memex.exporters.html import export
+
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        with Database(str(db_dir)) as db:
+            db.save_conversation(_make_conv())
+            db.add_note(conversation_id="c1", text="PRIVATE-NOTE-MARKER")
+
+        out_dir = tmp_path / "site"
+        db_path = str(db_dir / "conversations.db")
+        export(
+            [_make_conv()], str(out_dir),
+            db_path=db_path, compress_db=False, include_notes=False,
+        )
+
+        conn = _sqlite3.connect(str(out_dir / "conversations.db"))
+        try:
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert "notes" not in tables, "notes table leaked into a --no-notes export"
+        assert "notes_fts" not in tables
+
+    def test_export_default_keeps_notes_table(self, tmp_path):
+        """Default export (include_notes implied true) retains marginalia."""
+        import sqlite3 as _sqlite3
+        from llm_memex.db import Database
+        from llm_memex.exporters.html import export
+
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        with Database(str(db_dir)) as db:
+            db.save_conversation(_make_conv())
+            db.add_note(conversation_id="c1", text="kept-note")
+
+        out_dir = tmp_path / "site"
+        db_path = str(db_dir / "conversations.db")
+        export([_make_conv()], str(out_dir), db_path=db_path, compress_db=False)
+
+        conn = _sqlite3.connect(str(out_dir / "conversations.db"))
+        try:
+            kept = conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE text = 'kept-note'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert kept == 1
+
     def test_export_copies_assets(self, tmp_path):
         from llm_memex.db import Database
         from llm_memex.exporters.html import export

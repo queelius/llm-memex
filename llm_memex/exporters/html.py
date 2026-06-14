@@ -19,9 +19,9 @@ _FTS5_TABLES = ("messages_fts", "notes_fts")
 _DB_GZIP_LEVEL = 6
 
 
-def _strip_fts5_and_vacuum(db_path: Path) -> None:
+def _strip_fts5_and_vacuum(db_path: Path, *, drop_notes: bool = False) -> None:
     """Sanitize the exported DB copy: drop FTS5 tables, remove redaction-undo
-    plaintext, and VACUUM.
+    plaintext, optionally drop marginalia, and VACUUM.
 
     sql.js (used by the HTML SPA) cannot query FTS5 — it's not compiled in.
     The shadow tables are ~50% of a typical DB, so dropping them before
@@ -31,6 +31,12 @@ def _strip_fts5_and_vacuum(db_path: Path) -> None:
     enrichments so redaction is reversible. That undo copy holds exactly the
     secrets the user asked to remove, so it must never travel into a published
     bundle (treat any exported HTML as potentially public). It is deleted here.
+
+    When ``drop_notes`` is true (the ``--no-notes`` export path), the
+    ``notes`` marginalia table is dropped entirely so private annotations
+    never travel in a published bundle. ``notes_fts`` is already dropped via
+    ``_FTS5_TABLES``; this removes the base table the SPA would otherwise
+    read directly.
 
     Sets ``PRAGMA journal_mode=DELETE`` on the copy so no -wal/-shm sidecar
     files are left next to the exported database when the process is
@@ -44,6 +50,8 @@ def _strip_fts5_and_vacuum(db_path: Path) -> None:
             conn.execute("DELETE FROM enrichments WHERE type='original_content'")
         except sqlite3.OperationalError:
             pass  # no enrichments table (pre-v2 schema): nothing to strip
+        if drop_notes:
+            conn.execute("DROP TABLE IF EXISTS notes")
         conn.commit()
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute("VACUUM")
@@ -95,6 +103,11 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     db_path = kwargs.get("db_path")
     has_db = db_path and db_path != ":memory:" and os.path.exists(db_path)
     compress_db = kwargs.get("compress_db", True)
+    # The CLI passes include_notes=False for `--no-notes`. The DB copy is
+    # what carries all SPA data, so honoring the flag means dropping the
+    # notes table from that copy (the json/markdown exporters honor it by
+    # filtering their record stream; this exporter must do it at the DB).
+    include_notes = kwargs.get("include_notes", True)
 
     # Extract schema DDL from the database if available
     schema_ddl = ""
@@ -118,7 +131,7 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     if has_db:
         dest_db = out_dir / "conversations.db"
         shutil.copy2(db_path, dest_db)
-        _strip_fts5_and_vacuum(dest_db)
+        _strip_fts5_and_vacuum(dest_db, drop_notes=not include_notes)
         if compress_db:
             _gzip_file(dest_db, out_dir / "conversations.db.gz")
         assets_dir = Path(db_path).parent / "assets"

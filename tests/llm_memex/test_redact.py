@@ -984,3 +984,82 @@ class TestBatchPerItemFailure:
         assert "c1" in stats.get("failed", [])
         assert "c2" not in stats.get("failed", [])
         db.close()
+
+
+def _make_conv_with_blocks(blocks, id="c1", title="Test"):
+    """Build a one-message conversation whose content is arbitrary blocks."""
+    now = datetime.now()
+    conv = Conversation(id=id, created_at=now, updated_at=now, title=title,
+                        source="test", message_count=1)
+    conv.add_message(Message(id="m1", role="assistant", content=blocks))
+    return conv
+
+
+class TestNonTextBlockRedaction:
+    """B6: secrets in tool_use/tool_result/thinking blocks must be detected
+    and removed, not silently passed over with a false all-clear."""
+
+    def test_scan_detects_secret_in_tool_result_block(self):
+        from llm_memex.scripts.redact import compile_matchers, scan_message
+        matchers = compile_matchers(words=["sk-SECRET123"])
+        content = [{"type": "tool_result",
+                    "content": "the api key is sk-SECRET123 ok"}]
+        result = scan_message(content, matchers, "c1", "m1")
+        assert result.matches, "secret in tool_result block was not detected"
+        # Recorded as a structural match (no precise text offset).
+        assert all(m.start < 0 for m in result.matches)
+
+    def test_scan_skips_structural_keys(self):
+        """A coincidental match on a block's type/name must not fire."""
+        from llm_memex.scripts.redact import compile_matchers, scan_message
+        matchers = compile_matchers(words=["tool_use"])
+        content = [{"type": "tool_use", "name": "tool_use", "input": {"x": "safe"}}]
+        result = scan_message(content, matchers, "c1", "m1")
+        assert not result.matches
+
+    def test_apply_escalates_nontext_match_to_message_level(self, tmp_db_path):
+        from llm_memex.scripts.redact import run
+        db = Database(tmp_db_path)
+        conv = _make_conv_with_blocks([
+            {"type": "tool_result", "content": "leaked sk-SECRET123 here"},
+        ])
+        db.save_conversation(conv)
+        args = _make_args(words="sk-SECRET123", level="word", yes=True)
+        run(db, args, apply=True)
+        reloaded = db.load_conversation("c1")
+        # Whole message redacted; the secret is gone from stored content.
+        dumped = json.dumps(reloaded.messages["m1"].content)
+        assert "sk-SECRET123" not in dumped, "secret survived in a non-text block"
+        # Pre-redaction content preserved for undo.
+        originals = [e for e in db.get_enrichments("c1")
+                     if e["type"] == "original_content"]
+        assert len(originals) == 1
+        db.close()
+
+    def test_notes_are_redacted_on_apply(self, tmp_db_path):
+        from llm_memex.scripts.redact import run
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv_with_text("clean message"))
+        db.add_note(conversation_id="c1", text="reminder: token is sk-NOTESECRET")
+        args = _make_args(words="sk-NOTESECRET", level="word", yes=True)
+        stats = run(db, args, apply=True)
+        assert stats["notes_redacted"] == 1
+        rows = db.execute_sql("SELECT text FROM notes")
+        assert "sk-NOTESECRET" not in rows[0]["text"]
+        assert "[REDACTED]" in rows[0]["text"]
+        db.close()
+
+    def test_dry_run_reports_note_matches(self, tmp_db_path, capsys):
+        from llm_memex.scripts.redact import run
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv_with_text("clean message"))
+        db.add_note(conversation_id="c1", text="secret sk-NOTESECRET")
+        args = _make_args(words="sk-NOTESECRET", level="word")
+        stats = run(db, args, apply=False)
+        out = capsys.readouterr().out
+        assert stats["notes_matched"] == 1
+        assert "No matches found." not in out  # honest: notes DID match
+        assert "marginalia note" in out
+        # And the note is untouched by a dry run.
+        assert "sk-NOTESECRET" in db.execute_sql("SELECT text FROM notes")[0]["text"]
+        db.close()
