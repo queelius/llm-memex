@@ -287,7 +287,29 @@ def _save_convs(convs, source_path, args, db):
         if getattr(args, "merge", False):
             # Merge mode: preserve existing state, add only new messages and
             # tags. Also materialize any arkiv message-level notes.
+            #
+            # Pop _provenance BEFORE merge so a newly created conversation
+            # (merge falls through to save_conversation) does not serialize
+            # the internal provenance dict into the metadata JSON. Platform
+            # importers (claude_code_full/openai/anthropic) set _provenance
+            # and may carry media; the documented arkiv round-trip sets
+            # neither, so the asset pipeline + provenance write only run when
+            # provenance is present. Without this, --merge with a platform
+            # importer silently lost provenance and left media as absolute
+            # paths / base64.
+            prov = conv.metadata.pop("_provenance", None)
+            if prov and not args.no_copy_assets:
+                resolve_source_assets(conv, source_dir, prov.get("source_type", ""))
+                copy_assets(conv, asset_dir)
             stats = db.merge_conversation(conv)
+            if prov and stats["created_conversation"]:
+                db.save_provenance(
+                    conv.id,
+                    source_type=prov.get("source_type", "unknown"),
+                    source_file=prov.get("source_file"),
+                    source_id=prov.get("source_id"),
+                    source_hash=prov.get("source_hash"),
+                )
             if stats["created_conversation"] or stats["added_messages"] or stats["added_tags"]:
                 imported += 1
             else:

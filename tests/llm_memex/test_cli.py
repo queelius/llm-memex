@@ -579,6 +579,45 @@ class TestCLIImportSkipUnchangedUnit:
             )
             assert row[0]["summary"] == "user summary"
 
+    def test_merge_writes_provenance_and_strips_it_from_metadata(self, tmp_path):
+        """LLM-6: --merge with a platform importer must write the provenance
+        table for a newly created conversation and must not serialize the
+        internal _provenance dict into the conversation metadata JSON."""
+        import json as _json
+        import types
+        from datetime import datetime
+
+        from llm_memex.cli import _save_convs
+        from llm_memex.db import Database
+        from llm_memex.models import Conversation
+
+        db_dir = tmp_path / "db"
+        args = types.SimpleNamespace(
+            db=str(db_dir), merge=True, force=False, no_copy_assets=True
+        )
+        with Database(str(db_dir)) as db:
+            conv = Conversation(
+                id="c1", title="T", source="openai",
+                created_at=datetime(2023, 1, 1), updated_at=datetime(2023, 1, 2),
+            )
+            conv.metadata["_provenance"] = {
+                "source_type": "openai",
+                "source_file": "/x/conv.json",
+                "source_id": "src-1",
+                "source_hash": "abc",
+            }
+            _save_convs([conv], tmp_path, args, db)
+
+            prov_rows = db.get_provenance("c1")
+            assert prov_rows, "merge did not write the provenance table"
+            assert prov_rows[0]["source_type"] == "openai"
+
+            stored = db.execute_sql(
+                "SELECT metadata FROM conversations WHERE id=?", ("c1",)
+            )
+            meta = _json.loads(stored[0]["metadata"] or "{}")
+            assert "_provenance" not in meta
+
 
 class TestCLIExport:
     def test_export_markdown(self, tmp_path):
