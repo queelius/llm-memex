@@ -19,6 +19,7 @@ from llm_memex.importers._claude_code_common import (
     extract_session_metadata,
     build_conversation,
     import_directory,
+    MessageTreeBuilder,
 )
 
 
@@ -51,7 +52,11 @@ def _import_single(path: str) -> List[Conversation]:
 
     # Filter to conversation turns
     messages = []
-    parent_id = None
+    # Reconstruct the real message tree from parentUuid rather than linear
+    # chaining, so rewind/edit branches are not mis-parented (LLM-5). This
+    # importer skips even more records, so the walk-to-nearest-imported-
+    # ancestor logic matters more here.
+    tree = MessageTreeBuilder(records)
 
     for rec in records:
         event_type = rec.get("type")
@@ -73,10 +78,10 @@ def _import_single(path: str) -> List[Conversation]:
                     id=msg_id,
                     role="user",
                     content=[text_block(content)],
-                    parent_id=parent_id,
+                    parent_id=tree.parent_for(rec, msg_id),
                     created_at=_parse_iso(rec["timestamp"]) if rec.get("timestamp") else None,
                 ))
-                parent_id = msg_id
+                tree.mark(msg_id)
 
         elif event_type == "assistant":
             content_blocks = msg.get("content", [])
@@ -98,11 +103,11 @@ def _import_single(path: str) -> List[Conversation]:
                 id=msg_id,
                 role="assistant",
                 content=[text_block(joined)],
-                parent_id=parent_id,
+                parent_id=tree.parent_for(rec, msg_id),
                 model=msg.get("model"),
                 created_at=_parse_iso(rec["timestamp"]) if rec.get("timestamp") else None,
             ))
-            parent_id = msg_id
+            tree.mark(msg_id)
 
     # If no actual messages were extracted, don't create a conversation
     if not messages:

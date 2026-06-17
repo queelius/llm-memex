@@ -561,6 +561,68 @@ class TestClaudeCodeImport:
         assert msgs[2].parent_id == msgs[1].id
         assert msgs[3].parent_id == msgs[2].id
 
+    def test_rewind_branch_uses_parentuuid_not_linear(self, tmp_path):
+        """LLM-5: a rewind/edit re-parents onto an earlier ancestor. The
+        importer must honor parentUuid, not chain to the linear predecessor."""
+        events = [
+            _cc_event("user", uuid="u1", parent_uuid=None,
+                      message={"role": "user", "content": "first question"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "first answer"}]}),
+            _cc_event("user", uuid="u2", parent_uuid="a1",
+                      message={"role": "user", "content": "follow-up v1"}),
+            _cc_event("assistant", uuid="a2", parent_uuid="u2",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer v1"}]}),
+            # Rewind: the follow-up is edited, branching from a1 again (NOT a2).
+            _cc_event("user", uuid="u3", parent_uuid="a1",
+                      message={"role": "user", "content": "follow-up v2"}),
+            _cc_event("assistant", uuid="a3", parent_uuid="u3",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer v2"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        conv = claude_code_import(str(f))[0]
+        assert conv.messages["u1"].parent_id is None       # root
+        assert conv.messages["u2"].parent_id == "a1"
+        # The rewound turn branches from a1, not from the linear predecessor a2.
+        assert conv.messages["u3"].parent_id == "a1"
+        assert conv.messages["a3"].parent_id == "u3"
+
+    def test_skipped_parent_walks_to_nearest_imported_ancestor(self, tmp_path):
+        """LLM-5: when a record's parentUuid points at a skipped record, the
+        importer walks up to the nearest imported ancestor (diverging from
+        the linear predecessor)."""
+        events = [
+            _cc_event("user", uuid="u1", parent_uuid=None,
+                      message={"role": "user", "content": "q1"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer 1"}]}),
+            _cc_event("user", uuid="u2", parent_uuid="a1",
+                      message={"role": "user", "content": "q2"}),
+            _cc_event("assistant", uuid="a2", parent_uuid="u2",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer 2"}]}),
+            # tool_use-only assistant: SKIPPED by conversation_only; branches
+            # from a1.
+            _cc_event("assistant", uuid="askip", parent_uuid="a1",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "tool_use", "id": "t1",
+                                            "name": "Read", "input": {}}]}),
+            # Its child's parentUuid is the skipped record; nearest imported
+            # ancestor is a1 (NOT the linear predecessor a2).
+            _cc_event("user", uuid="u3", parent_uuid="askip",
+                      message={"role": "user", "content": "q3"}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        conv = claude_code_import(str(f))[0]
+        assert "askip" not in conv.messages  # skipped
+        assert conv.messages["u3"].parent_id == "a1"
+
     def test_import_skips_tool_use(self, tmp_path):
         """Assistant messages with only tool_use (no text) are skipped."""
         events = [
@@ -911,6 +973,29 @@ class TestClaudeCodeFullDetect:
 
 
 class TestClaudeCodeFullImport:
+    def test_rewind_branch_uses_parentuuid(self, tmp_path):
+        """LLM-5: the full-fidelity importer must also honor parentUuid so a
+        rewind/edit branch is not linearized onto the wrong ancestor."""
+        events = [
+            _cc_event("user", uuid="u1", parent_uuid=None,
+                      message={"role": "user", "content": "q1"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer 1"}]}),
+            _cc_event("user", uuid="u2", parent_uuid="a1",
+                      message={"role": "user", "content": "follow-up v1"}),
+            _cc_event("assistant", uuid="a2", parent_uuid="u2",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "answer v1"}]}),
+            _cc_event("user", uuid="u3", parent_uuid="a1",  # rewind onto a1
+                      message={"role": "user", "content": "follow-up v2"}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        conv = claude_code_full_import(str(f))[0]
+        assert conv.messages["u3"].parent_id == "a1"  # not the predecessor a2
+        assert conv.messages["u1"].parent_id is None
+
     def test_import_preserves_tool_use(self, tmp_path):
         """Tool use blocks are preserved in full import."""
         events = [

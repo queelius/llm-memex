@@ -26,6 +26,7 @@ from llm_memex.importers._claude_code_common import (
     import_directory,
     find_subagent_files,
     extract_agent_id,
+    MessageTreeBuilder,
 )
 
 
@@ -104,7 +105,9 @@ def _import_single(path: str, ignore_sidechain: bool = False) -> List[Conversati
         return []
 
     messages = []
-    parent_id = None
+    # Reconstruct the real message tree from parentUuid rather than linear
+    # chaining, so rewind/edit branches are not mis-parented (LLM-5).
+    tree = MessageTreeBuilder(records)
 
     for rec in records:
         event_type = rec.get("type")
@@ -140,10 +143,10 @@ def _import_single(path: str, ignore_sidechain: bool = False) -> List[Conversati
                 id=msg_id,
                 role="user",
                 content=blocks,
-                parent_id=parent_id,
+                parent_id=tree.parent_for(rec, msg_id),
                 created_at=_parse_iso(rec["timestamp"]) if rec.get("timestamp") else None,
             ))
-            parent_id = msg_id
+            tree.mark(msg_id)
 
         elif event_type == "assistant":
             content_blocks = msg.get("content", [])
@@ -164,11 +167,11 @@ def _import_single(path: str, ignore_sidechain: bool = False) -> List[Conversati
                 id=msg_id,
                 role="assistant",
                 content=blocks,
-                parent_id=parent_id,
+                parent_id=tree.parent_for(rec, msg_id),
                 model=msg.get("model"),
                 created_at=_parse_iso(rec["timestamp"]) if rec.get("timestamp") else None,
             ))
-            parent_id = msg_id
+            tree.mark(msg_id)
 
     if not messages:
         return []

@@ -20,6 +20,63 @@ KNOWN_EVENT_TYPES = {
 }
 
 
+class MessageTreeBuilder:
+    """Resolve each message's parent from Claude Code ``parentUuid`` links.
+
+    Claude Code records carry ``parentUuid`` forming the real message tree
+    (the root's is null); a rewind/edit branches within the same file by
+    re-parenting onto an earlier ancestor. Pure linear chaining (parent =
+    previous kept message) mis-parents those branches and corrupts the tree
+    that ``get_all_paths()`` and ``messages.parent_id`` were built to model.
+
+    Both importers skip many records (sidechain, empty, non-message events),
+    so a message's literal ``parentUuid`` may reference a record that was not
+    imported. :meth:`parent_for` walks up the ``parentUuid`` chain to the
+    nearest already-imported ancestor, falling back to linear chaining only
+    when a record carries no ``parentUuid`` key at all (legacy/odd records).
+
+    Usage per record, in file order::
+
+        tree = MessageTreeBuilder(records)
+        ...
+        msg = Message(..., parent_id=tree.parent_for(rec, msg_id))
+        tree.mark(msg_id)
+    """
+
+    def __init__(self, records: List[dict]):
+        self._parent_of: Dict[str, Optional[str]] = {
+            r["uuid"]: r.get("parentUuid")
+            for r in records
+            if isinstance(r, dict) and r.get("uuid")
+        }
+        self._imported: set = set()
+        self._last_imported: Optional[str] = None
+
+    def parent_for(self, rec: dict, msg_id: str) -> Optional[str]:
+        """Parent id for the message built from *rec* (id *msg_id*)."""
+        if "parentUuid" in rec:
+            resolved = self._nearest_imported(rec.get("parentUuid"))
+        else:
+            resolved = self._last_imported
+        # Never let a message parent itself (defensive against malformed data).
+        return resolved if resolved != msg_id else self._last_imported
+
+    def mark(self, msg_id: str) -> None:
+        """Record that *msg_id* was imported (call after appending it)."""
+        self._imported.add(msg_id)
+        self._last_imported = msg_id
+
+    def _nearest_imported(self, parent_uuid: Optional[str]) -> Optional[str]:
+        seen: set = set()
+        cur = parent_uuid
+        while cur is not None and cur not in seen:
+            if cur in self._imported:
+                return cur
+            seen.add(cur)
+            cur = self._parent_of.get(cur)
+        return None  # whole ancestor chain skipped: treat as a root
+
+
 def detect_file(path: str) -> bool:
     """Check if a single file is a Claude Code JSONL session transcript.
 
