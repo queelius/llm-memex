@@ -1,4 +1,5 @@
 """Export conversations as a self-contained HTML SPA directory."""
+import contextlib
 import gzip
 import os
 import shutil
@@ -19,9 +20,12 @@ _FTS5_TABLES = ("messages_fts", "notes_fts")
 _DB_GZIP_LEVEL = 6
 
 
-def _strip_fts5_and_vacuum(db_path: Path, *, drop_notes: bool = False) -> None:
+def _strip_fts5_and_vacuum(
+    db_path: Path, *, drop_notes: bool = False, include_archived: bool = False
+) -> None:
     """Sanitize the exported DB copy: drop FTS5 tables, remove redaction-undo
-    plaintext, optionally drop marginalia, and VACUUM.
+    plaintext, drop soft-deleted conversations, optionally drop marginalia,
+    and VACUUM.
 
     sql.js (used by the HTML SPA) cannot query FTS5 — it's not compiled in.
     The shadow tables are ~50% of a typical DB, so dropping them before
@@ -38,6 +42,13 @@ def _strip_fts5_and_vacuum(db_path: Path, *, drop_notes: bool = False) -> None:
     ``_FTS5_TABLES``; this removes the base table the SPA would otherwise
     read directly.
 
+    Unless ``include_archived`` is true, soft-deleted conversations
+    (``archived_at IS NOT NULL``) and all their child rows are physically
+    removed from the copy. The SPA never references ``archived_at``, so a
+    conversation the user "deleted" before publishing would otherwise appear
+    in the home list, search, and librarian SQL of a public bundle. Treat
+    any exported HTML as potentially public.
+
     Sets ``PRAGMA journal_mode=DELETE`` on the copy so no -wal/-shm sidecar
     files are left next to the exported database when the process is
     interrupted, and a subsequent VACUUM produces a fully-packed file.
@@ -50,6 +61,21 @@ def _strip_fts5_and_vacuum(db_path: Path, *, drop_notes: bool = False) -> None:
             conn.execute("DELETE FROM enrichments WHERE type='original_content'")
         except sqlite3.OperationalError:
             pass  # no enrichments table (pre-v2 schema): nothing to strip
+        if not include_archived:
+            # Remove soft-deleted conversations and their child rows. Done
+            # explicitly per table (rather than relying on FK cascade, which
+            # needs PRAGMA foreign_keys=ON set before any transaction) so it
+            # is robust across schema versions and ON DELETE SET NULL on
+            # notes (which would otherwise orphan a note's text in the copy).
+            archived = (
+                "(SELECT id FROM conversations WHERE archived_at IS NOT NULL)"
+            )
+            for tbl in ("messages", "tags", "enrichments", "provenance", "notes"):
+                with contextlib.suppress(sqlite3.OperationalError):
+                    conn.execute(
+                        f"DELETE FROM {tbl} WHERE conversation_id IN {archived}"
+                    )
+            conn.execute("DELETE FROM conversations WHERE archived_at IS NOT NULL")
         if drop_notes:
             conn.execute("DROP TABLE IF EXISTS notes")
         conn.commit()
@@ -108,6 +134,9 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     # notes table from that copy (the json/markdown exporters honor it by
     # filtering their record stream; this exporter must do it at the DB).
     include_notes = kwargs.get("include_notes", True)
+    # Privacy default: soft-deleted conversations never travel in a published
+    # bundle unless the caller explicitly opts in.
+    include_archived = kwargs.get("include_archived", False)
 
     # Extract schema DDL from the database if available
     schema_ddl = ""
@@ -131,7 +160,9 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     if has_db:
         dest_db = out_dir / "conversations.db"
         shutil.copy2(db_path, dest_db)
-        _strip_fts5_and_vacuum(dest_db, drop_notes=not include_notes)
+        _strip_fts5_and_vacuum(
+            dest_db, drop_notes=not include_notes, include_archived=include_archived
+        )
         if compress_db:
             _gzip_file(dest_db, out_dir / "conversations.db.gz")
         assets_dir = Path(db_path).parent / "assets"

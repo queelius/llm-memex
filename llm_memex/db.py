@@ -658,7 +658,12 @@ class Database:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  title=excluded.title, source=excluded.source,"
-                "  model=excluded.model, summary=excluded.summary,"
+                "  model=excluded.model,"
+                # Keep an existing summary when the importer supplies none:
+                # platform exports carry no summary, so a routine re-import
+                # of an active conversation would otherwise null out a
+                # summary the user set via update_conversations.
+                "  summary=COALESCE(excluded.summary, conversations.summary),"
                 "  message_count=excluded.message_count,"
                 "  created_at=excluded.created_at, updated_at=excluded.updated_at,"
                 "  starred_at=excluded.starred_at, pinned_at=excluded.pinned_at,"

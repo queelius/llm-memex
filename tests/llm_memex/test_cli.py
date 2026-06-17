@@ -527,6 +527,58 @@ class TestCLIImportSkipUnchangedUnit:
         with Database(tmp_db_path) as db:
             assert db.conversation_unchanged("nope", datetime(2023, 1, 1), 0) is False
 
+    def test_reimport_preserves_enrichments_and_summary(self, tmp_path):
+        """CF1: re-importing a CHANGED conversation must not wipe user
+        enrichments or a user-set summary. The importer carries neither, so
+        the default re-import path was silently destroying both."""
+        import types
+        from datetime import datetime
+
+        from llm_memex.cli import _save_convs
+        from llm_memex.db import Database
+        from llm_memex.models import Conversation
+
+        db_dir = tmp_path / "db"
+        args = types.SimpleNamespace(
+            db=str(db_dir), merge=False, force=False, no_copy_assets=True
+        )
+        with Database(str(db_dir)) as db:
+            v1 = Conversation(
+                id="c1", title="Topic", source="openai",
+                created_at=datetime(2023, 1, 1), updated_at=datetime(2023, 1, 2),
+            )
+            v1.message_count = 3  # __post_init__ resets to len(messages)
+            _save_convs([v1], tmp_path, args, db)
+
+            # User enriches + sets a summary post-import.
+            db.save_enrichment("c1", "summary", "hand-written summary", "user")
+            db.save_enrichment("c1", "importance", "high", "user")
+            db.conn.execute(
+                "UPDATE conversations SET summary=? WHERE id=?",
+                ("user summary", "c1"),
+            )
+            db.conn.commit()
+
+            # Re-import a CHANGED version (more messages); importer carries
+            # no summary and no enrichments.
+            v2 = Conversation(
+                id="c1", title="Topic", source="openai",
+                created_at=datetime(2023, 1, 1), updated_at=datetime(2023, 1, 3),
+                summary=None,
+            )
+            v2.message_count = 5
+            imported, unchanged = _save_convs([v2], tmp_path, args, db)
+            assert (imported, unchanged) == (1, 0)  # changed -> re-saved
+
+            enr = {(e["type"], e["value"]) for e in db.get_enrichments("c1")}
+            assert ("summary", "hand-written summary") in enr
+            assert ("importance", "high") in enr
+
+            row = db.execute_sql(
+                "SELECT summary FROM conversations WHERE id=?", ("c1",)
+            )
+            assert row[0]["summary"] == "user summary"
+
 
 class TestCLIExport:
     def test_export_markdown(self, tmp_path):

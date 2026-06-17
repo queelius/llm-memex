@@ -93,6 +93,9 @@ def main():
     exp.add_argument("--list-formats", action="store_true", help="List available export formats")
     exp.add_argument("--no-notes", action="store_true",
                      help="Exclude notes from exported output")
+    exp.add_argument("--include-archived", action="store_true",
+                     help="Include soft-deleted (archived) conversations in the "
+                          "export (HTML export excludes them by default)")
     exp.add_argument(
         "--db",
         help="Database directory",
@@ -304,7 +307,17 @@ def _save_convs(convs, source_path, args, db):
             source_type = prov.get("source_type", "") if prov else ""
             resolve_source_assets(conv, source_dir, source_type)
             copy_assets(conv, asset_dir)
+        # save_conversation does a full replace of the conversation's child
+        # rows (it DELETEs enrichments). Enrichments are derived OR
+        # user-authored (summary/topic/importance/excerpt set via
+        # update_conversations), and the importer never carries them, so a
+        # routine re-import of an active conversation would silently wipe
+        # them. Capture them before the replace and re-insert after, exactly
+        # as provenance is re-written below.
+        existing_enrichments = db.get_enrichments(conv.id)
         db.save_conversation(conv)
+        if existing_enrichments:
+            db.save_enrichments(conv.id, existing_enrichments)
         if prov:
             db.save_provenance(
                 conv.id,
@@ -545,11 +558,13 @@ def _cmd_export(args):
                 break
             cursor = result["next_cursor"]
         include_notes = not getattr(args, "no_notes", False)
+        include_archived = getattr(args, "include_archived", False)
         exporter_mod.export(
             convs, args.output,
             db_path=db.db_path,
             db=db,
             include_notes=include_notes,
+            include_archived=include_archived,
         )
         print(f"Exported {len(convs)} conversation(s) to {args.output}")
 

@@ -1089,6 +1089,62 @@ class TestHtmlExporter:
         finally:
             raw.unlink()
 
+    def test_export_excludes_archived_by_default(self, tmp_path):
+        """LLM-4: soft-deleted conversations must not ship in a published
+        bundle. The SPA never filters archived_at, so a 'deleted'
+        conversation would otherwise appear in the home list and search."""
+        from datetime import datetime
+        from llm_memex.db import Database
+        from llm_memex.exporters.html import export
+
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        live = _make_conv(conv_id="live", title="Live")
+        archived = _make_conv(conv_id="dead", title="Secret Deleted")
+        archived.archived_at = datetime(2024, 6, 1)
+        with Database(str(db_dir)) as db:
+            db.save_conversation(live)
+            db.save_conversation(archived)
+
+        out_dir = tmp_path / "site"
+        export(
+            [live, archived], str(out_dir),
+            db_path=str(db_dir / "conversations.db"), compress_db=False,
+        )
+        with Database(str(out_dir), readonly=True) as db2:
+            ids = {r["id"] for r in db2.execute_sql("SELECT id FROM conversations")}
+            # The archived conversation's messages must be gone too.
+            msg_convs = {
+                r["conversation_id"]
+                for r in db2.execute_sql("SELECT conversation_id FROM messages")
+            }
+        assert "live" in ids
+        assert "dead" not in ids, "archived conversation leaked into bundle"
+        assert "dead" not in msg_convs
+
+    def test_export_include_archived_opt_in(self, tmp_path):
+        """--include-archived keeps soft-deleted conversations in the copy."""
+        from datetime import datetime
+        from llm_memex.db import Database
+        from llm_memex.exporters.html import export
+
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        archived = _make_conv(conv_id="dead", title="Deleted")
+        archived.archived_at = datetime(2024, 6, 1)
+        with Database(str(db_dir)) as db:
+            db.save_conversation(archived)
+
+        out_dir = tmp_path / "site"
+        export(
+            [archived], str(out_dir),
+            db_path=str(db_dir / "conversations.db"),
+            compress_db=False, include_archived=True,
+        )
+        with Database(str(out_dir), readonly=True) as db2:
+            ids = {r["id"] for r in db2.execute_sql("SELECT id FROM conversations")}
+        assert "dead" in ids
+
     def test_export_compress_db_false_keeps_raw(self, tmp_path):
         """compress_db=False opt-out emits the plain .db."""
         from llm_memex.db import Database
