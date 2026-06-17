@@ -31,8 +31,9 @@ Round-trip fidelity notes:
     - Provenance (source_type, source_file, source_hash) — not emitted.
     - Conversation-level flags (starred_at, pinned_at, archived_at, sensitive).
 
-    Conversation-level notes are also not currently preserved; only
-    message-level notes attached to a specific message round-trip.
+    Conversation-level notes round-trip too: they are carried as a
+    per-conversation record with metadata.target_kind="conversation" and
+    metadata.conversation_notes, materialized back on import.
 
     Import uses INSERT OR IGNORE semantics via the Database layer
     (`save_conversation` uses INSERT OR REPLACE, which is idempotent for the
@@ -287,8 +288,18 @@ def _reconstruct_conversation(
     )
 
     prev_id: Optional[str] = None
+    conv_notes: List[Dict[str, Any]] = []
     for pos, (_, rec) in enumerate(recs_sorted):
         meta = rec.get("metadata") or {}
+
+        # Conversation-level note carrier (no message): collect its notes for
+        # the CLI to materialize and do not synthesize a spurious message.
+        if meta.get("target_kind") == "conversation" and meta.get(
+            "conversation_notes"
+        ):
+            conv_notes.extend(meta["conversation_notes"])
+            continue
+
         msg_id = meta.get("message_id")
         if not msg_id:
             # Synthesize a stable id from conv + position so re-imports match.
@@ -322,5 +333,11 @@ def _reconstruct_conversation(
 
         conv.add_message(msg)
         prev_id = msg_id
+
+    # Stash conversation-level notes for the CLI to materialize after save,
+    # mirroring how message-level notes ride on msg.metadata["_arkiv_notes"].
+    if conv_notes:
+        conv.metadata = dict(conv.metadata)
+        conv.metadata["_arkiv_conversation_notes"] = conv_notes
 
     return conv

@@ -254,6 +254,19 @@ def _materialize_arkiv_notes(conv, db):
             })
         # Clean up so save_conversation doesn't re-serialize internal metadata.
         msg.metadata.pop("_arkiv_notes", None)
+
+    # Conversation-level notes (no message_id). merge_notes defaults
+    # target_kind="conversation" when message_id is absent.
+    conv_notes = conv.metadata.pop("_arkiv_conversation_notes", None) if conv.metadata else None
+    for n in conv_notes or []:
+        if not n.get("id") or not n.get("text"):
+            continue
+        notes.append({
+            "id": n["id"],
+            "conversation_id": conv.id,
+            "text": n["text"],
+        })
+
     if notes:
         db.merge_notes(notes)
 

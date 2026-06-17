@@ -795,10 +795,23 @@ class TestArkivExportNotes:
         build = self._import_build_records()
         conv = _load_conv(db_with_notes)
         records = build([conv], include_notes=True, db=db_with_notes)
-        assert len(records) == 1
-        meta = records[0]["metadata"]
+        # One message record + one conversation-level note carrier (LLM-3:
+        # conv-level notes used to be silently dropped, leaving just the
+        # message record).
+        msg_records = [r for r in records if r["metadata"].get("message_id")]
+        assert len(msg_records) == 1
+        meta = msg_records[0]["metadata"]
         assert "notes" in meta
         assert any(n["text"] == "msg-level annotation" for n in meta["notes"])
+        carriers = [
+            r for r in records
+            if r["metadata"].get("target_kind") == "conversation"
+        ]
+        assert len(carriers) == 1
+        assert any(
+            n["text"] == "conv-level annotation"
+            for n in carriers[0]["metadata"]["conversation_notes"]
+        )
 
     def test_arkiv_no_notes_flag(self, db_with_notes):
         build = self._import_build_records()

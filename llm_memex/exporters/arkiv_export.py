@@ -187,6 +187,37 @@ def _build_records(
                     "metadata": metadata,
                 }
             )
+
+        # Conversation-level notes (the default annotation path in a
+        # published SPA, where chat is off) have no message_id, so they were
+        # never emitted by the per-message loop and silently lost on the
+        # round-trip. Emit one carrier record per conversation that has them.
+        if include_notes and db:
+            conv_notes = [
+                n
+                for n in db.get_notes(
+                    conversation_id=conv.id, target_kind="conversation"
+                )
+                if n.get("id") and n.get("text")
+            ]
+            if conv_notes:
+                carrier_meta: Dict[str, Any] = {
+                    "conversation_id": conv.id,
+                    "target_kind": "conversation",
+                    "conversation_notes": [
+                        {"id": n["id"], "text": n["text"]} for n in conv_notes
+                    ],
+                }
+                if conv.title:
+                    carrier_meta["conversation_title"] = conv.title
+                records.append(
+                    {
+                        "mimetype": "text/plain",
+                        "content": conv.title or conv.id,
+                        "timestamp": conv.created_at.isoformat(),
+                        "metadata": carrier_meta,
+                    }
+                )
     return records
 
 

@@ -4,10 +4,11 @@ These are the durability contract tests for the arkiv format: if a seeded DB
 round-trips losslessly through an arkiv bundle (directory, zip, or tar.gz),
 the archive is provably durable through that interchange format.
 
-Note: the arkiv export is intentionally text-centric — it does NOT round-trip
+Note: the arkiv export is intentionally text-centric. It does NOT round-trip
 every llm-memex field (enrichments, provenance, starred/pinned flags,
-conversation-level notes, tool_use blocks). These tests assert what IS
-preserved; see ``llm_memex/importers/arkiv.py`` docstring for the full list.
+tool_use blocks), though message- and conversation-level notes do round-trip.
+These tests assert what IS preserved; see ``llm_memex/importers/arkiv.py``
+docstring for the full list.
 """
 from __future__ import annotations
 
@@ -174,6 +175,52 @@ class TestDirectoryRoundTrip:
                 ("conv-1",),
             )
             assert len(msg_rows) == 2
+
+
+class TestConversationNoteRoundTrip:
+    """LLM-3: conversation-level notes are the default annotation path in a
+    published SPA (chat off -> the input box saves a conversation note). They
+    must round-trip through arkiv export/import, not be silently dropped."""
+
+    def test_conversation_note_round_trips(self, tmp_path):
+        from llm_memex.cli import _materialize_arkiv_notes
+
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        arkiv_dir = tmp_path / "arkiv"
+        with Database(str(src_dir)) as src_db:
+            src_db.save_conversation(_seed_conversation())
+            src_db.add_note(
+                conversation_id="conv-1",
+                text="Whole-conversation annotation",
+            )
+            # export needs the db to fetch notes
+            arkiv_export([_seed_conversation()], str(arkiv_dir), db=src_db)
+
+        reimported = arkiv_import(str(arkiv_dir))
+        assert len(reimported) == 1
+        conv = reimported[0]
+        # No spurious message was created from the note carrier record.
+        assert len(conv.messages) == 2
+        # The conv-level note rode back on metadata for the CLI to materialize.
+        assert conv.metadata.get("_arkiv_conversation_notes")
+
+        dst_dir = tmp_path / "dst"
+        dst_dir.mkdir()
+        with Database(str(dst_dir)) as dst_db:
+            dst_db.save_conversation(conv)
+            _materialize_arkiv_notes(conv, dst_db)
+            note_rows = dst_db.execute_sql(
+                "SELECT target_kind, message_id, text FROM notes "
+                "WHERE conversation_id = ?",
+                ("conv-1",),
+            )
+        assert any(
+            r["target_kind"] == "conversation"
+            and r["message_id"] is None
+            and r["text"] == "Whole-conversation annotation"
+            for r in note_rows
+        ), note_rows
 
 
 # ── round-trip: zip ────────────────────────────────────────────
