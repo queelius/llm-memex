@@ -350,7 +350,7 @@ def _readme_bytes(num_conversations: int) -> bytes:
         "# llm-memex Conversations Archive",
         "",
         f"This archive contains {num_conversations} conversation(s) exported from llm-memex",
-        "in [arkiv](https://github.com/alonzo-church/arkiv) universal record format.",
+        "in [arkiv](https://github.com/queelius/arkiv) universal record format.",
         "",
         "Each record in `conversations.jsonl` represents one message with metadata",
         "linking it back to its conversation, speaker role, and source platform.",

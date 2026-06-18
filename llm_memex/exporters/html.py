@@ -147,8 +147,11 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
         except Exception:
             pass
 
-    # Write index.html
-    (out_dir / "index.html").write_text(get_template(schema_ddl=schema_ddl))
+    # Write index.html (utf-8 explicit: the template contains non-ASCII, so a
+    # non-UTF-8 default locale would otherwise raise UnicodeEncodeError).
+    (out_dir / "index.html").write_text(
+        get_template(schema_ddl=schema_ddl), encoding="utf-8"
+    )
 
     # Vendor sql.js (no CDN dependency)
     for filename in _SQL_JS_FILES:

@@ -3178,7 +3178,7 @@ def _js_chat(schema_ddl: str = "") -> str:
         '          parts.push(parsed[i].text);\n'
         '        }\n'
         '      }\n'
-        '      return parts.join("");\n'
+        '      return parts.join("\\n");\n'
         '    }\n'
         '    if (typeof parsed === "string") return parsed;\n'
         '    return "";\n'

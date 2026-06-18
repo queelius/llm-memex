@@ -141,3 +141,36 @@ class TestJSONExporter:
         assert msg["content"][0]["type"] == "text"
         assert msg["content"][1]["type"] == "media"
         assert msg["content"][1]["url"] == "http://example.com/img.png"
+
+
+class TestArkivReadme:
+    def test_readme_links_correct_arkiv_org(self):
+        """LLM-8: the generated bundle README must point at the real arkiv
+        repository (queelius/arkiv), not a nonexistent org."""
+        from llm_memex.exporters.arkiv_export import _readme_bytes
+
+        readme = _readme_bytes(num_conversations=3).decode("utf-8")
+        assert "https://github.com/queelius/arkiv" in readme
+        assert "alonzo-church" not in readme
+
+
+class TestHtmlExportEncoding:
+    def test_index_html_written_as_utf8(self, tmp_path, monkeypatch):
+        """LLM-9: index.html must be written with encoding='utf-8'. The
+        template carries non-ASCII characters, so relying on the locale
+        default breaks export under a non-UTF-8 locale."""
+        import pathlib
+
+        from llm_memex.exporters import html as html_exporter
+
+        captured = {}
+        orig_write_text = pathlib.Path.write_text
+
+        def spy_write_text(self, data, encoding=None, *args, **kwargs):
+            if self.name == "index.html":
+                captured["encoding"] = encoding
+            return orig_write_text(self, data, encoding=encoding, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "write_text", spy_write_text)
+        html_exporter.export([], str(tmp_path / "site"))
+        assert captured.get("encoding") == "utf-8"

@@ -1318,11 +1318,39 @@ class Database:
                 "DELETE FROM messages_fts WHERE conversation_id=?",
                 (conversation_id,),
             )
+            # Notes survive via ON DELETE SET NULL (orphan survival), but their
+            # notes_fts shadow rows still carry the now-deleted conversation_id.
+            # Capture the surviving note ids before the delete, then re-sync
+            # their FTS rows afterward so the shadow column matches the notes
+            # table (conversation_id NULL), the same way update_note does.
+            orphaned_note_ids = [
+                r["id"] for r in self.conn.execute(
+                    "SELECT id FROM notes WHERE conversation_id=?",
+                    (conversation_id,),
+                ).fetchall()
+            ]
             # CASCADE handles messages, tags, enrichments, provenance
             cursor = self.conn.execute(
                 "DELETE FROM conversations WHERE id=?",
                 (conversation_id,),
             )
+            for note_id in orphaned_note_ids:
+                row = self.conn.execute(
+                    "SELECT conversation_id, message_id, text FROM notes "
+                    "WHERE id=?",
+                    (note_id,),
+                ).fetchone()
+                self.conn.execute(
+                    "DELETE FROM notes_fts WHERE note_id=?", (note_id,)
+                )
+                if row is not None:
+                    self.conn.execute(
+                        "INSERT INTO notes_fts "
+                        "(note_id, conversation_id, message_id, text) "
+                        "VALUES (?, ?, ?, ?)",
+                        (note_id, row["conversation_id"], row["message_id"],
+                         row["text"]),
+                    )
             self.conn.commit()
             return cursor.rowcount > 0
         except Exception:

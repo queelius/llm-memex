@@ -18,6 +18,14 @@ class TestHtmlTemplate:
         assert 'id="settings-overlay"' in html
         assert "anthropic-dangerous-direct-browser-access" in html
 
+    def test_extract_msg_text_joins_with_newline(self):
+        """LLM-10: the SPA's _extractMsgText must mirror Python Message.get_text,
+        which joins text blocks with '\\n', not ''."""
+        html = get_template()
+        # The _extractMsgText body joins with a newline.
+        assert "_extractMsgText" in html
+        assert 'parts.join("\\n")' in html
+
     def test_template_contains_css_custom_properties(self):
         html = get_template()
         assert "--bg:" in html

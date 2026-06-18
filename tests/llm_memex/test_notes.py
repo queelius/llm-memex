@@ -286,6 +286,40 @@ class TestDatabaseNotesCRUD:
         assert len(fts) == 1
         assert "quokka" in fts[0]["text"]
 
+    def test_delete_conversation_resyncs_orphaned_note_fts(self, db_with_conversation):
+        """CF3: a note survives conversation hard-delete (ON DELETE SET NULL),
+        but its notes_fts shadow row must be re-synced to conversation_id NULL
+        rather than keep pointing at the deleted conversation."""
+        db = db_with_conversation
+        note_id = db.add_note(conversation_id="c1", text="durable observation")
+
+        # Before delete: shadow row carries the conversation id.
+        before = db.conn.execute(
+            "SELECT conversation_id FROM notes_fts WHERE note_id=?", (note_id,)
+        ).fetchone()
+        assert before["conversation_id"] == "c1"
+
+        assert db.delete_conversation("c1") is True
+
+        # The note row survives with conversation_id NULL.
+        note = db.conn.execute(
+            "SELECT conversation_id FROM notes WHERE id=?", (note_id,)
+        ).fetchone()
+        assert note is not None
+        assert note["conversation_id"] is None
+
+        # The shadow row must agree (no stale 'c1' left behind).
+        after = db.conn.execute(
+            "SELECT conversation_id FROM notes_fts WHERE note_id=?", (note_id,)
+        ).fetchone()
+        assert after is not None
+        assert after["conversation_id"] is None
+        # And the note text remains searchable.
+        hits = db.conn.execute(
+            "SELECT note_id FROM notes_fts WHERE notes_fts MATCH 'durable'"
+        ).fetchall()
+        assert [h["note_id"] for h in hits] == [note_id]
+
     def test_update_note_changes_text(self, db_with_conversation):
         db = db_with_conversation
         note_id = db.add_note(conversation_id="c1", text="original")
