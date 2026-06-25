@@ -47,5 +47,5 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
                 for note in msg_notes.get(msg.id, []):
                     lines.append(f"> **Note:** {note['text']}\n")
             lines.append("---\n")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

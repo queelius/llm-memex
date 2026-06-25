@@ -66,5 +66,5 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
             conv_dict["notes"] = conv_notes
         data.append(conv_dict)
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

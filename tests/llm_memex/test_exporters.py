@@ -154,6 +154,74 @@ class TestArkivReadme:
         assert "alonzo-church" not in readme
 
 
+class TestExportEncoding:
+    """R2: text exporters must write UTF-8 regardless of the locale default.
+
+    On a non-UTF-8 default locale, ``open(path, "w")`` (with no explicit
+    ``encoding``) uses the locale codec; exporting non-ASCII content then
+    raises UnicodeEncodeError and aborts. We simulate that locale by wrapping
+    ``builtins.open`` so any text-mode call left at ``encoding=None`` falls
+    back to ASCII (as a non-UTF-8 locale would). With the fix the exporters
+    pass ``encoding='utf-8'`` explicitly, so the wrapper never substitutes.
+    """
+
+    @staticmethod
+    def _force_ascii_locale_open(monkeypatch):
+        import builtins
+
+        real_open = builtins.open
+
+        def patched_open(file, mode="r", *args, **kwargs):
+            if "b" not in mode and kwargs.get("encoding") is None and len(args) < 1:
+                kwargs["encoding"] = "ascii"
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", patched_open)
+
+    def _make_unicode_conv(self):
+        now = datetime(2024, 6, 15)
+        conv = Conversation(
+            id="c1", created_at=now, updated_at=now,
+            title="Cafe resume naive", source="test",
+        )
+        # Non-ASCII content: accented Latin, em dash, CJK, emoji.
+        unicode_text = "Cafe é — 你好 \U0001f600"
+        conv.add_message(Message(id="m1", role="user", content=[text_block(unicode_text)]))
+        return conv, unicode_text
+
+    def test_markdown_exports_non_ascii_under_non_utf8_locale(self, tmp_path, monkeypatch):
+        conv, unicode_text = self._make_unicode_conv()
+        out = tmp_path / "out.md"
+        self._force_ascii_locale_open(monkeypatch)
+        md_export([conv], str(out))
+        content = out.read_bytes().decode("utf-8")
+        assert unicode_text in content
+
+    def test_json_opens_output_with_explicit_utf8(self, tmp_path, monkeypatch):
+        """The JSON exporter does not crash today only because json.dump
+        defaults to ensure_ascii=True (ASCII-safe bytes). The open() call is
+        still locale-dependent, so for robustness it must request UTF-8
+        explicitly. Assert the encoding argument rather than content, since
+        content alone cannot distinguish the bug from the fix here."""
+        import builtins
+
+        conv, _ = self._make_unicode_conv()
+        out = tmp_path / "out.json"
+        real_open = builtins.open
+        captured = {}
+
+        def spy_open(file, mode="r", *args, **kwargs):
+            if str(file) == str(out) and "w" in mode:
+                captured["encoding"] = kwargs.get("encoding")
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", spy_open)
+        json_export([conv], str(out))
+        assert captured.get("encoding") == "utf-8"
+        data = json.loads(out.read_bytes().decode("utf-8"))
+        assert data[0]["id"] == "c1"
+
+
 class TestHtmlExportEncoding:
     def test_index_html_written_as_utf8(self, tmp_path, monkeypatch):
         """LLM-9: index.html must be written with encoding='utf-8'. The
