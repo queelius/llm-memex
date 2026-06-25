@@ -826,6 +826,119 @@ class TestCLIExportArkiv:
         assert content == ""
 
 
+class TestCLIExportArchivedExclusion:
+    """Soft-deleted (archived) conversations must not travel in a published
+    export by default. This is the privacy contract: archiving is the user's
+    soft delete, and a published bundle (arkiv, json, markdown) must deny
+    archived conversations unless the caller explicitly opts in with
+    ``--include-archived``. The HTML exporter already enforces this at the DB
+    copy; these tests cover the record-emitting exporters via the shared load
+    step in the export command.
+    """
+
+    def _import_two(self, tmp_path):
+        """Import two conversations (one kept, one to be archived).
+
+        The kept conversation's text is ``VISIBLE_TEXT`` and the archived
+        one's is ``SECRET_DELETED_TEXT`` so leakage is easy to assert on.
+        """
+        db_dir = tmp_path / "db"
+        export_file = tmp_path / "export.json"
+        export_file.write_text(json.dumps([
+            {
+                "id": "keep", "title": "Keep Me",
+                "create_time": 1700000000, "update_time": 1700000001,
+                "mapping": {
+                    "m1": {
+                        "id": "m1", "parent": None, "children": [],
+                        "message": {
+                            "id": "m1", "author": {"role": "user"},
+                            "content": {"parts": ["VISIBLE_TEXT"]},
+                            "create_time": 1700000000,
+                        },
+                    },
+                },
+            },
+            {
+                "id": "arch", "title": "Archived One",
+                "create_time": 1700000000, "update_time": 1700000002,
+                "mapping": {
+                    "m1": {
+                        "id": "m1", "parent": None, "children": [],
+                        "message": {
+                            "id": "m1", "author": {"role": "user"},
+                            "content": {"parts": ["SECRET_DELETED_TEXT"]},
+                            "create_time": 1700000000,
+                        },
+                    },
+                },
+            },
+        ]))
+        subprocess.run(
+            [sys.executable, "-m", "llm_memex", "import", str(export_file),
+             "--db", str(db_dir)],
+            capture_output=True, text=True, check=True,
+        )
+        # Soft-delete (archive) the second conversation.
+        from llm_memex.db import Database
+        with Database(str(db_dir)) as db:
+            db.update_conversation("arch", archived=True)
+        return db_dir
+
+    def test_arkiv_excludes_archived_by_default(self, tmp_path):
+        db_dir = self._import_two(tmp_path)
+        out_dir = tmp_path / "arkiv_out"
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out_dir),
+             "--format", "arkiv", "--db", str(db_dir)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        content = (out_dir / "conversations.jsonl").read_text()
+        assert "VISIBLE_TEXT" in content
+        assert "SECRET_DELETED_TEXT" not in content
+
+    def test_arkiv_includes_archived_with_opt_in(self, tmp_path):
+        db_dir = self._import_two(tmp_path)
+        out_dir = tmp_path / "arkiv_out"
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out_dir),
+             "--format", "arkiv", "--db", str(db_dir), "--include-archived"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        content = (out_dir / "conversations.jsonl").read_text()
+        assert "VISIBLE_TEXT" in content
+        assert "SECRET_DELETED_TEXT" in content
+
+    def test_json_excludes_archived_by_default(self, tmp_path):
+        db_dir = self._import_two(tmp_path)
+        out_file = tmp_path / "out.json"
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out_file),
+             "--format", "json", "--db", str(db_dir)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(out_file.read_text())
+        ids = {c["id"] for c in data}
+        assert "keep" in ids
+        assert "arch" not in ids
+
+    def test_markdown_excludes_archived_by_default(self, tmp_path):
+        db_dir = self._import_two(tmp_path)
+        out_file = tmp_path / "out.md"
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out_file),
+             "--format", "markdown", "--db", str(db_dir)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        content = out_file.read_text()
+        assert "VISIBLE_TEXT" in content
+        assert "SECRET_DELETED_TEXT" not in content
+
+
 class TestCLIShow:
     def _import_one(self, tmp_path):
         """Helper: import one conversation, return db_dir."""

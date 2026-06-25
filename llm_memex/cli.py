@@ -579,12 +579,24 @@ def _cmd_export(args):
 
     exporter_mod = exporters[args.format]["module"]
 
+    include_notes = not getattr(args, "no_notes", False)
+    include_archived = getattr(args, "include_archived", False)
+
     with _open_db(args) as db:
-        # Load conversations in chunks to avoid memory exhaustion
+        # Load conversations in chunks to avoid memory exhaustion.
+        # Privacy contract: soft-deleted (archived) conversations must not
+        # travel in a published bundle by default. Filtering at this shared
+        # load step protects every record-emitting exporter (arkiv, json,
+        # markdown) at once. (The HTML exporter additionally strips archived
+        # rows from its DB copy.) Pass archived=False unless the caller opts
+        # in with --include-archived.
+        query_archived = None if include_archived else False
         convs = []
         cursor = None
         while True:
-            result = db.query_conversations(limit=100, cursor=cursor)
+            result = db.query_conversations(
+                limit=100, cursor=cursor, archived=query_archived
+            )
             for item in result["items"]:
                 conv = db.load_conversation(item["id"])
                 if conv is not None:
@@ -592,8 +604,6 @@ def _cmd_export(args):
             if not result["has_more"]:
                 break
             cursor = result["next_cursor"]
-        include_notes = not getattr(args, "no_notes", False)
-        include_archived = getattr(args, "include_archived", False)
         exporter_mod.export(
             convs, args.output,
             db_path=db.db_path,
