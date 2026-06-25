@@ -56,7 +56,7 @@ llm_memex/
   __init__.py          # version (single source of truth; pyproject.toml reads it dynamically)
   __main__.py          # python -m llm_memex
   models.py            # ContentBlock, Message, Conversation (tree)
-  db.py                # Database (raw sqlite3, WAL, FTS5, migrations, schema v6)
+  db.py                # Database (raw sqlite3, WAL, FTS5, migrations, schema v7)
   config.py            # YAML config, DatabaseRegistry (multi-database support)
   mcp.py               # FastMCP server (6 tools, 2 resources)
   assets.py            # Asset resolution, copying, media markdown rendering
@@ -85,7 +85,7 @@ llm_memex/
 - Convention-based plugins: importers have `detect()` + `import_path()`, exporters have `export()`, scripts have `register_args()` + `run()`. User overrides in `~/.memex/{importers,exporters,scripts}/`
 - FastMCP 2.x (pinned `<3`) with lifespan pattern for DB lifecycle
 - Cursor-based keyset pagination (base64-encoded updated_at + id)
-- Schema versioning: `schema_version` table + `MIGRATIONS` dict for forward migrations (current: v6)
+- Schema versioning: `schema_version` table + `MIGRATIONS` dict for forward migrations (current: v7)
 - Multi-database YAML config (`~/.memex/config.yaml`) with `sql_write: true` to enable writes via MCP
 - pyproject.toml version is dynamic from `llm_memex.__version__`
 
@@ -149,7 +149,7 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 - **Librarian chat**: agentic tool-use loop (streaming first round, non-streaming for tool rounds, max 5 rounds). SQL guard rejects non-SELECT/EXPLAIN + `getRowsModified` runtime check
 - **Notes UI**: pencil icons on messages/headers, inline composer, edit/delete, persisted in sql.js in-memory DB. Graceful degradation for pre-v4 archives
 - **Security**: `escAttr()` for attribute escaping, `safeMediaUrl()` allowlist (blocks javascript:/vbscript:), URL validation in renderMarkdown
-- **Edge proxy**: default endpoint `metafunctor-edge.queelius.workers.dev/v1/messages` (no API key needed; proxy injects server-side, locks model to haiku)
+- **Chat config (no default endpoint)**: ships with no API endpoint configured; chat is disabled until the reader sets an endpoint and key in Settings (`isChatConfigured()` requires a non-empty `llm_memex_endpoint` in localStorage). With chat off, the librarian input is inert and a conversation-mode composer saves its text as a marginalia note instead of calling an LLM. The reader supplies their own key (sent as `x-api-key` for Anthropic or `Authorization: Bearer` for OpenAI-compatible); nothing is injected server-side. This is the C6e / convention #9 security-by-default contract.
 
 ## Gotchas
 
