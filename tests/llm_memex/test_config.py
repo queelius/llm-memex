@@ -122,6 +122,18 @@ class TestDatabaseRegistry:
         assert reg.get_db(None) is reg.get_db("main")
         reg.close()
 
+    def test_get_db_default_no_primary_clear_error(self, tmp_path):
+        # R4: databases configured but no primary -> a clear message, not the
+        # opaque "Unknown database: None".
+        self._init_db(tmp_path / "main")
+        reg = DatabaseRegistry({
+            "databases": {"main": {"path": str(tmp_path / "main")}},
+            "sql_write": False,
+        })
+        with pytest.raises(ValueError, match="no primary database"):
+            reg.get_db(None)
+        reg.close()
+
     def test_get_db_unknown(self, tmp_path):
         self._init_db(tmp_path / "main")
         reg = DatabaseRegistry({

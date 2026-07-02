@@ -59,6 +59,13 @@ class DatabaseRegistry:
         """Get a database by name, or the primary database if name is None."""
         if name is None:
             name = self.primary
+            if name is None:
+                available = ", ".join(sorted(self._dbs)) or "none"
+                raise ValueError(
+                    "No database specified and no primary database is "
+                    f"configured (available: {available}). Pass a name or set "
+                    "a primary in the config."
+                )
         if name not in self._dbs:
             raise ValueError(f"Unknown database: {name}")
         return self._dbs[name]

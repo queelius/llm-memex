@@ -1202,3 +1202,33 @@ class TestMergeAndSchema:
         db.close()
         assert "c1000" in ids
         assert ids[0] == "c1000"
+
+
+class TestAddNoteMessageValidation:
+    """R5: a message-level note must anchor to a real message."""
+
+    def _conv_with_message(self, db):
+        now = datetime.now()
+        conv = Conversation(id="c1", created_at=now, updated_at=now)
+        conv.add_message(
+            Message(id="m1", role="user", content=[text_block("hi")])
+        )
+        db.save_conversation(conv)
+
+    def test_add_note_to_existing_message(self, tmp_db_path):
+        db = Database(tmp_db_path)
+        self._conv_with_message(db)
+        note_id = db.add_note(
+            conversation_id="c1", text="a note", message_id="m1"
+        )
+        assert note_id
+
+    def test_add_note_to_missing_message_raises(self, tmp_db_path):
+        import pytest
+
+        db = Database(tmp_db_path)
+        self._conv_with_message(db)
+        with pytest.raises(ValueError, match="not found"):
+            db.add_note(
+                conversation_id="c1", text="a note", message_id="does-not-exist"
+            )

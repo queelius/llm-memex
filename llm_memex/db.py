@@ -1490,6 +1490,18 @@ class Database:
         if note_id is None:
             note_id = str(_uuid.uuid4())
         target_kind = "message" if message_id else "conversation"
+        # A message-level note must anchor to a real message in this
+        # conversation; otherwise the note points at nothing.
+        if message_id is not None:
+            exists = self.conn.execute(
+                "SELECT 1 FROM messages WHERE conversation_id = ? AND id = ?",
+                (conversation_id, message_id),
+            ).fetchone()
+            if exists is None:
+                raise ValueError(
+                    f"message_id {message_id!r} not found in conversation "
+                    f"{conversation_id!r}; cannot anchor a note to it"
+                )
         now = _fmt_dt(datetime.now())
         try:
             self.conn.execute(
