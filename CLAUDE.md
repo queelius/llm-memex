@@ -86,7 +86,7 @@ llm_memex/
 - FastMCP 2.x (pinned `<3`) with lifespan pattern for DB lifecycle
 - Cursor-based keyset pagination (base64-encoded updated_at + id)
 - Schema versioning: `schema_version` table + `MIGRATIONS` dict for forward migrations (current: v7)
-- Multi-database YAML config (`~/.memex/config.yaml`) with `sql_write: true` to enable writes via MCP
+- Multi-database YAML config (`~/.memex/config.yaml`). Two independent write switches: `sql_write: true` (or `MEMEX_SQL_WRITE=true`) lets raw `execute_sql` write; a per-database `readonly: true` disables every write, structured tools included. By default the structured write tools (`update_conversations`, `append_message`, `add_note`) work and raw SQL is read-only
 - pyproject.toml version is dynamic from `llm_memex.__version__`
 
 ## Database Schema (v7)
@@ -136,7 +136,7 @@ WHERE notes_fts MATCH 'query'
 
 - Tests in `tests/llm_memex/` organized by module: `test_db.py`, `test_mcp.py`, `test_cli.py`, `test_importers.py`, `test_exporters.py`, `test_models.py`, `test_notes.py`, `test_graph.py`, `test_redact.py`, `test_scripts.py`, `test_assets.py`, `test_config.py`, `test_html_export.py`, `test_integration.py`
 - `conftest.py` provides `tmp_db_path` fixture
-- Server tests exercise DB methods directly; `create_server(db=db)` sets PRAGMA query_only=ON; use `sql_write=True` for tests that call write tools
+- Server tests exercise DB methods directly; `create_server(db=db, sql_write=...)` controls only raw `execute_sql` writes. Structured write tools work on any writable `Database`; test their refusal path with `Database(path, readonly=True)`
 - `_get_tool_fn(server, name)` extracts the underlying function from FastMCP for direct invocation in tests
 - Coverage is enabled by default in `pytest.ini`
 
@@ -155,6 +155,7 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 
 - `Database(path)` takes a **directory** path (creates `conversations.db` inside it), except for `:memory:`
 - `Database(path, readonly=True)` installs a sqlite3 **authorizer** (`_authorize`, gated by `_WRITE_ACTIONS`) in addition to `PRAGMA query_only`. The authorizer denies all write actions, `ATTACH`/`DETACH` (so agent SQL cannot reach sibling DB files), and any attempt to flip `query_only` back off. This is strictly stronger than `query_only` alone, which agent-supplied SQL can otherwise turn off to regain write access. Writes on a readonly connection raise `sqlite3.DatabaseError: not authorized`
+- MCP `execute_sql` goes through `Database.execute_agent_sql`, which (unless `sql_write`) runs on a **separate** `mode=ro` connection with the same write-denying authorizer, never on `self.conn`. Keeping agent SQL off the main connection also stops it changing connection state the structured writes rely on (`PRAGMA foreign_keys=OFF`). An in-memory `Database` cannot be reopened read-only, so agent SQL on a writable `:memory:` DB raises `ValueError`
 - `_auto_import` prefers `claude_code_full` over `claude_code` when both detect the same file
 - `get_all_paths()` is iterative (not recursive) to handle 1000+ message chains
 - FTS queries sanitize via `_sanitize_fts_query()` (strips quotes, OR-joins tokens); LIKE fallback uses `_escape_like()`

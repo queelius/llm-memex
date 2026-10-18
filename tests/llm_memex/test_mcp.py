@@ -633,14 +633,82 @@ class TestSqlSecurity:
         with pytest.raises(Exception):
             fn(sql=f"ATTACH DATABASE '{other}' AS x")
 
-    def test_append_message_denied_on_readonly(self, db):
+    def test_append_message_denied_on_readonly(self, db, tmp_db_path):
         """append_message must refuse cleanly on a readonly DB, like the other write tools (MCP-4)."""
         from fastmcp.exceptions import ToolError
-        server = create_server(db=db, sql_write=False)
+        ro = Database(tmp_db_path, readonly=True)
+        server = create_server(db=ro, sql_write=False)
         fn = _get_tool_fn(server, "append_message")
         with pytest.raises(ToolError):
             fn(conversation_id="c1", role="user",
                content=[{"type": "text", "text": "x"}])
+
+
+class TestSqlWriteDecoupling:
+    """sql_write governs raw execute_sql only; structured write tools work
+    on any writable database (previously one flag gated both)."""
+
+    @pytest.mark.parametrize("sql", [
+        "UPDATE conversations SET title='HACKED' WHERE id='c1'",
+        "CREATE TABLE probe(x)",
+        "DELETE FROM messages",
+    ])
+    def test_raw_sql_writes_denied_without_sql_write(self, db, sql):
+        server = create_server(db=db, sql_write=False)
+        with pytest.raises(Exception):
+            _get_tool_fn(server, "execute_sql")(sql=sql)
+        assert db.execute_sql("SELECT title FROM conversations")[0]["title"] == "Test"
+        assert not db.execute_sql("SELECT name FROM sqlite_master WHERE name='probe'")
+
+    def test_structured_writes_work_without_sql_write(self, db):
+        server = create_server(db=db, sql_write=False)
+        _get_tool_fn(server, "update_conversations")(ids=["c1"], title="Renamed")
+        _get_tool_fn(server, "add_note")(conversation_id="c1", text="a note")
+        _get_tool_fn(server, "append_message")(
+            conversation_id="c1", role="user", content=[{"type": "text", "text": "more"}]
+        )
+        assert db.execute_sql("SELECT title FROM conversations")[0]["title"] == "Renamed"
+        assert db.execute_sql("SELECT text FROM notes")[0]["text"] == "a note"
+
+    def test_raw_sql_reads_see_structured_writes(self, db):
+        server = create_server(db=db, sql_write=False)
+        _get_tool_fn(server, "update_conversations")(ids=["c1"], title="Fresh")
+        rows = _get_tool_fn(server, "execute_sql")(sql="SELECT title FROM conversations")
+        assert rows[0]["title"] == "Fresh"
+
+    def test_raw_sql_cannot_change_main_connection_state(self, db):
+        """Agent SQL runs on its own connection, so a PRAGMA it sets cannot
+        weaken the connection the structured writes use."""
+        server = create_server(db=db, sql_write=False)
+        _get_tool_fn(server, "execute_sql")(sql="PRAGMA foreign_keys=OFF")
+        assert db.conn.execute("PRAGMA foreign_keys").fetchone()["foreign_keys"] == 1
+
+    def test_sql_write_enables_raw_writes(self, db):
+        server = create_server(db=db, sql_write=True)
+        _get_tool_fn(server, "execute_sql")(sql="UPDATE conversations SET title='W' WHERE id='c1'")
+        assert db.execute_sql("SELECT title FROM conversations")[0]["title"] == "W"
+
+    def test_registry_opens_writable_unless_configured_readonly(self, tmp_path):
+        from llm_memex.config import DatabaseRegistry
+        Database(str(tmp_path / "b")).close()  # readonly requires an existing DB
+        reg = DatabaseRegistry({
+            "primary": "a",
+            "databases": {"a": {"path": str(tmp_path / "a")},
+                          "b": {"path": str(tmp_path / "b"), "readonly": True}},
+        })
+        try:
+            assert reg.sql_write is False
+            assert reg.get_db("a").readonly is False
+            assert reg.get_db("b").readonly is True
+        finally:
+            reg.close()
+
+    def test_in_memory_writable_db_refuses_agent_sql(self):
+        """An in-memory DB cannot be reopened read-only; fail loudly rather
+        than run agent SQL on the writable connection."""
+        mem = Database(":memory:")
+        with pytest.raises(ValueError):
+            mem.execute_agent_sql("SELECT 1")
 
 
 class TestSqlBoundsAndContract:

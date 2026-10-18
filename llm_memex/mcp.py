@@ -84,9 +84,6 @@ def create_server(db=None, sql_write=False):
     """
     mcp = FastMCP("llm-memex", lifespan=lifespan if db is None else None)
     if db is not None:
-        if not sql_write and not db.readonly:
-            db.conn.execute("PRAGMA query_only=ON")
-            db.readonly = True
         mcp._test_db = db
         mcp._test_sql_write = sql_write
     _register_tools(mcp)
@@ -105,6 +102,14 @@ def _get_registry(ctx) -> DatabaseRegistry | None:
 # Upper bound on rows execute_sql will return, so an unbounded query (e.g. a
 # cartesian product or a SELECT * over a huge table) cannot exhaust memory.
 _MAX_SQL_ROWS = 10000
+
+
+def _sql_write_from_ctx(mcp, ctx) -> bool:
+    """Whether raw execute_sql may write (the ``sql_write`` setting)."""
+    registry = _get_registry(ctx)
+    if registry is not None:
+        return bool(registry.sql_write)
+    return bool(mcp._test_sql_write)
 
 
 def _get_db_from_ctx(mcp, ctx, db_name=None):
@@ -203,12 +208,14 @@ Starred/pinned (use IS NOT NULL for boolean timestamp columns):
   SELECT id, title FROM conversations WHERE starred_at IS NOT NULL
 """
         database = _get_db_from_ctx(mcp, ctx, db)
+        allow_writes = _sql_write_from_ctx(mcp, ctx)
         try:
-            rows = database.execute_sql(
-                sql, tuple(params) if params else (), max_rows=_MAX_SQL_ROWS + 1
+            rows = database.execute_agent_sql(
+                sql, tuple(params) if params else (), max_rows=_MAX_SQL_ROWS + 1,
+                allow_writes=allow_writes,
             )
         except Exception as e:
-            raise _sql_error_to_tool_error(e, database.readonly)
+            raise _sql_error_to_tool_error(e, database.readonly or not allow_writes)
         if len(rows) > _MAX_SQL_ROWS:
             raise ToolError(
                 f"Query returned more than {_MAX_SQL_ROWS} rows; add a LIMIT "
@@ -490,8 +497,8 @@ Examples:
         # don't crash mid-loop leaving caller with a partial-update state.
         if database.readonly:
             raise ToolError(
-                "SQL writes are disabled for this database. "
-                "Set MEMEX_SQL_WRITE=true to enable."
+                "This database is opened read-only (readonly: true in the "
+                "llm-memex config); writes are disabled."
             )
         updated = []
         errors = []
@@ -528,8 +535,8 @@ Examples:
         database = _get_db_from_ctx(mcp, ctx, db)
         if database.readonly:
             raise ToolError(
-                "SQL writes are disabled for this database. "
-                "Set MEMEX_SQL_WRITE=true to enable."
+                "This database is opened read-only (readonly: true in the "
+                "llm-memex config); writes are disabled."
             )
         msg_id = str(uuid.uuid4())
         msg = Message(
@@ -566,8 +573,8 @@ Notes are searchable via execute_sql against notes_fts (FTS5):
         database = _get_db_from_ctx(mcp, ctx, db)
         if database.readonly:
             raise ToolError(
-                "SQL writes are disabled for this database. "
-                "Set MEMEX_SQL_WRITE=true to enable."
+                "This database is opened read-only (readonly: true in the "
+                "llm-memex config); writes are disabled."
             )
         try:
             note_id = database.add_note(

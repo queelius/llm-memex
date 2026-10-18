@@ -435,6 +435,28 @@ _WRITE_ACTIONS = frozenset(
 )
 
 
+def _authorize_action(action, arg1, arg2, *, deny_writes: bool) -> int:
+    """Authorizer decision shared by every llm-memex connection; see
+    Database._authorize."""
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    if deny_writes:
+        if action in _WRITE_ACTIONS:
+            return sqlite3.SQLITE_DENY
+        if (action == sqlite3.SQLITE_PRAGMA and isinstance(arg1, str)
+                and arg1.lower() == "query_only" and arg2 is not None):
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _fetch(cursor: sqlite3.Cursor, max_rows: Optional[int]) -> List[Dict[str, Any]]:
+    if max_rows is not None:
+        # Bounded fetch: stops after max_rows rows instead of materializing
+        # an unbounded result set in memory.
+        return cursor.fetchmany(max_rows)
+    return cursor.fetchall()
+
+
 class Database:
     def __init__(self, path: str, readonly: bool = False):
         if path == ":memory:":
@@ -446,6 +468,9 @@ class Database:
             db_dir.mkdir(parents=True, exist_ok=True)
             self.db_path = str(db_dir / "conversations.db")
         self.readonly = readonly
+        # Dedicated read-only connection for agent-supplied SQL, opened on
+        # first use; see execute_agent_sql.
+        self._agent_conn: Optional[sqlite3.Connection] = None
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = _dict_factory
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -464,15 +489,7 @@ class Database:
         arbitrary database files). On a read-only connection it additionally
         denies all writes and any attempt to turn query_only back off, so the
         read-only contract cannot be lifted from within SQL."""
-        if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
-            return sqlite3.SQLITE_DENY
-        if self.readonly:
-            if action in _WRITE_ACTIONS:
-                return sqlite3.SQLITE_DENY
-            if (action == sqlite3.SQLITE_PRAGMA and isinstance(arg1, str)
-                    and arg1.lower() == "query_only" and arg2 is not None):
-                return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
+        return _authorize_action(action, arg1, arg2, deny_writes=self.readonly)
 
     def _ensure_schema(self):
         # Check if this is a pre-existing DB (has conversations but no schema_version)
@@ -563,6 +580,12 @@ class Database:
         return False
 
     def close(self):
+        if self._agent_conn is not None:
+            try:
+                self._agent_conn.close()
+            except Exception:
+                pass
+            self._agent_conn = None
         if self.conn:
             try:
                 self.conn.close()
@@ -576,11 +599,44 @@ class Database:
         if cursor.description is None:
             self.conn.commit()
             return []
-        if max_rows is not None:
-            # Bounded fetch: stops after max_rows rows instead of materializing
-            # an unbounded result set in memory.
-            return cursor.fetchmany(max_rows)
-        return cursor.fetchall()
+        return _fetch(cursor, max_rows)
+
+    def execute_agent_sql(self, sql: str, params: tuple = (),
+                          max_rows: Optional[int] = None, *,
+                          allow_writes: bool = False) -> List[Dict[str, Any]]:
+        """Run SQL supplied by an MCP client rather than by llm-memex itself.
+
+        Unless *allow_writes* (the ``sql_write`` setting), it runs on a
+        dedicated read-only connection, never on ``self.conn``. That keeps
+        raw SQL read-only while the structured write tools keep working on a
+        writable database, and it stops agent SQL from changing the main
+        connection's state (``PRAGMA foreign_keys=OFF``, say) that those
+        structured writes then run under.
+        """
+        if allow_writes and not self.readonly:
+            return self.execute_sql(sql, params, max_rows)
+        cursor = self._agent_connection().execute(sql, params)
+        return [] if cursor.description is None else _fetch(cursor, max_rows)
+
+    def _agent_connection(self) -> sqlite3.Connection:
+        if self.readonly:
+            # The main connection already denies every write.
+            return self.conn
+        if self._agent_conn is None:
+            if self.db_path == ":memory:":
+                raise ValueError(
+                    "read-only agent SQL needs a file-backed database: an "
+                    "in-memory database cannot be reopened read-only"
+                )
+            uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = _dict_factory
+            conn.set_authorizer(
+                lambda action, arg1, arg2, db_name, source:
+                    _authorize_action(action, arg1, arg2, deny_writes=True)
+            )
+            self._agent_conn = conn
+        return self._agent_conn
 
     def get_schema(self) -> str:
         # Filter out FTS5 internal tables (shadow tables) -- they're

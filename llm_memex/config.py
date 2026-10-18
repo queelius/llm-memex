@@ -43,7 +43,6 @@ class DatabaseRegistry:
         self.primary = config.get("primary")
         self.sql_write = config.get("sql_write", False)
         self._dbs: Dict[str, Database] = {}
-        readonly = not self.sql_write
         for name, db_config in config.get("databases", {}).items():
             if not isinstance(db_config, dict):
                 raise ValueError(
@@ -53,7 +52,12 @@ class DatabaseRegistry:
             if "path" not in db_config:
                 raise ValueError(f"database '{name}' is missing required 'path'")
             path = os.path.expanduser(db_config["path"])
-            self._dbs[name] = Database(path, readonly=readonly)
+            # sql_write governs only raw execute_sql (Database.execute_agent_sql);
+            # the structured write tools work unless the database itself is
+            # configured read-only.
+            self._dbs[name] = Database(
+                path, readonly=bool(db_config.get("readonly", False))
+            )
 
     def get_db(self, name: str | None = None) -> Database:
         """Get a database by name, or the primary database if name is None."""
