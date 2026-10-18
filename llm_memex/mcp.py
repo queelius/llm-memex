@@ -1,5 +1,10 @@
 """Memex MCP server -- the primary interface."""
-from __future__ import annotations
+# NOTE: deliberately NOT using `from __future__ import annotations`. FastMCP
+# builds each tool's pydantic argument schema by resolving the function's type
+# hints at registration time. With stringized (deferred) annotations, the
+# `Annotated[...]` hints are eval'd against a namespace that does not contain
+# `Annotated`/`Field`, raising `NameError: name 'Annotated' is not defined`
+# under fastmcp 2.14+. Keeping annotations as real objects avoids that eval.
 
 import json
 import re
