@@ -74,13 +74,27 @@ class TestCreateServer:
         server = create_server(db=db)
         assert server._test_db is db
 
-    def test_server_has_six_tools(self, db):
+    def test_server_has_seven_tools(self, db):
         server = create_server(db=db)
         tool_names = [t.name for t in server._tool_manager._tools.values()]
         assert sorted(tool_names) == sorted([
             "execute_sql", "get_conversation", "get_conversations",
             "update_conversations", "append_message", "add_note",
+            "get_record_kinds",
         ])
+
+
+class TestRecordKinds:
+    def test_declaration_matches_schema_and_resolves(self, db):
+        """Every declared kind's table/id column exists, and the record tool
+        resolves a real row of it."""
+        server = create_server(db=db)
+        kinds = _get_tool_fn(server, "get_record_kinds")()["kinds"]
+        assert [k["kind"] for k in kinds] == ["conversation"]
+        for k in kinds:
+            rows = db.execute_sql(f'SELECT `{k["id_column"]}` AS id FROM `{k["table"]}` LIMIT 1')
+            got = _get_tool_fn(server, "get_conversation")(id=rows[0]["id"])
+            assert got["id"] == rows[0]["id"]
 
     def test_server_has_two_resources(self, db):
         server = create_server(db=db)

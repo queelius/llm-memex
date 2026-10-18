@@ -169,8 +169,27 @@ def _conv_metadata(conv, db) -> dict:
     }
 
 
+# URI kind -> (table, id column) for every kind the record tool
+# (get_conversation) resolves: llm-memex://conversation/<id>. Served by
+# get_record_kinds, the archive-contract declaration of what a record is.
+RECORD_KINDS: dict[str, tuple[str, str]] = {"conversation": ("conversations", "id")}
+
+
 def _register_tools(mcp: FastMCP):
     """Register all MCP tools on the server."""
+
+    @mcp.tool(annotations={"readOnlyHint": True})
+    def get_record_kinds() -> dict:
+        """Declare the URI kinds this archive resolves (llm-memex://<kind>/<id>)
+        and the table and id column backing each. Part of the *-memex archive
+        contract; conversations are the only record kind (messages are
+        positions within one, addressed by #fragment)."""
+        return {
+            "kinds": [
+                {"kind": kind, "table": table, "id_column": id_column}
+                for kind, (table, id_column) in RECORD_KINDS.items()
+            ]
+        }
 
     @mcp.tool(annotations={"readOnlyHint": True})
     def execute_sql(
