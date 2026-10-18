@@ -41,33 +41,17 @@ Round-trip fidelity notes:
 """
 from __future__ import annotations
 
-import gzip
-import io
-import json
-import tarfile
-import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from arkiv import iter_jsonl, peek_jsonl
+
+from llm_memex.exporters.arkiv_export import MEMBER
 from llm_memex.models import Conversation, Message, text_block
 
 
 # ── detection ──────────────────────────────────────────────────
-
-def _jsonl_peek_first_record(reader) -> Optional[Dict[str, Any]]:
-    """Return the first parsed JSONL record, or None if unparseable/empty."""
-    try:
-        for line in reader:
-            line = line.strip() if isinstance(line, str) else line.decode("utf-8").strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            return rec if isinstance(rec, dict) else None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return None
-
 
 def _is_llm_memex_arkiv_record(rec: Dict[str, Any]) -> bool:
     """Heuristic: does this record look like one of ours?
@@ -87,129 +71,10 @@ def _is_llm_memex_arkiv_record(rec: Dict[str, Any]) -> bool:
 
 def detect(path: str) -> bool:
     """Return True if *path* looks like an arkiv bundle we can read."""
-    p = Path(path)
-    if not p.exists():
+    if not Path(path).exists():
         return False
-
-    # Directory layout
-    if p.is_dir():
-        jsonl = p / "conversations.jsonl"
-        if not jsonl.is_file():
-            return False
-        with open(jsonl, "r", encoding="utf-8") as f:
-            rec = _jsonl_peek_first_record(f)
-        return rec is not None and _is_llm_memex_arkiv_record(rec)
-
-    # .zip
-    if p.suffix.lower() == ".zip":
-        try:
-            with zipfile.ZipFile(p) as zf:
-                names = set(zf.namelist())
-                if "conversations.jsonl" not in names:
-                    return False
-                with zf.open("conversations.jsonl") as f:
-                    rec = _jsonl_peek_first_record(f)
-                return rec is not None and _is_llm_memex_arkiv_record(rec)
-        except (zipfile.BadZipFile, KeyError):
-            return False
-
-    lower = str(p).lower()
-
-    # .tar.gz / .tgz
-    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
-        try:
-            with tarfile.open(p, "r:gz") as tf:
-                try:
-                    member = tf.getmember("conversations.jsonl")
-                except KeyError:
-                    return False
-                # extractfile() can raise KeyError (e.g. a symlink member with
-                # an unresolvable linkname), which is NOT a tarfile.TarError.
-                # Catch it (and other I/O-ish errors) so a malformed bundle
-                # returns False rather than aborting auto-detection.
-                extracted = tf.extractfile(member)
-                if extracted is None:
-                    return False
-                rec = _jsonl_peek_first_record(extracted)
-            return rec is not None and _is_llm_memex_arkiv_record(rec)
-        except (tarfile.TarError, KeyError, OSError, EOFError):
-            return False
-
-    # bare .jsonl.gz (single-file arkiv, e.g. emitted by the browser SPA)
-    if lower.endswith(".jsonl.gz"):
-        try:
-            with gzip.open(p, "rt", encoding="utf-8") as f:
-                rec = _jsonl_peek_first_record(f)
-            return rec is not None and _is_llm_memex_arkiv_record(rec)
-        except (OSError, gzip.BadGzipFile):
-            return False
-
-    # bare .jsonl
-    if lower.endswith(".jsonl"):
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                rec = _jsonl_peek_first_record(f)
-            return rec is not None and _is_llm_memex_arkiv_record(rec)
-        except OSError:
-            return False
-
-    return False
-
-
-# ── bundle reading ─────────────────────────────────────────────
-
-def _open_jsonl(path: str) -> Iterable[Dict[str, Any]]:
-    """Yield records from the conversations.jsonl inside a bundle."""
-    p = Path(path)
-    if p.is_dir():
-        with open(p / "conversations.jsonl", "r", encoding="utf-8") as f:
-            yield from _parse_jsonl_lines(f)
-        return
-    if p.suffix.lower() == ".zip":
-        with zipfile.ZipFile(p) as zf:
-            with zf.open("conversations.jsonl") as f:
-                # ZipFile opens in binary mode; wrap for line iteration.
-                text = io.TextIOWrapper(f, encoding="utf-8")
-                yield from _parse_jsonl_lines(text)
-        return
-    lower = str(p).lower()
-    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
-        with tarfile.open(p, "r:gz") as tf:
-            # getmember/extractfile can raise KeyError (missing member, or a
-            # symlink member with an unresolvable linkname) which is NOT a
-            # tarfile.TarError; treat any such failure as "nothing to read"
-            # rather than letting it propagate and abort the import.
-            try:
-                member = tf.getmember("conversations.jsonl")
-                extracted = tf.extractfile(member)
-            except (tarfile.TarError, KeyError, OSError, EOFError):
-                return
-            if extracted is None:
-                return
-            text = io.TextIOWrapper(extracted, encoding="utf-8")
-            yield from _parse_jsonl_lines(text)
-        return
-    if lower.endswith(".jsonl.gz"):
-        with gzip.open(p, "rt", encoding="utf-8") as f:
-            yield from _parse_jsonl_lines(f)
-        return
-    if lower.endswith(".jsonl"):
-        with open(p, "r", encoding="utf-8") as f:
-            yield from _parse_jsonl_lines(f)
-        return
-    raise ValueError(f"unrecognized arkiv bundle: {path!r}")
-
-
-def _parse_jsonl_lines(reader) -> Iterable[Dict[str, Any]]:
-    for line in reader:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            # Tolerate individual bad lines rather than failing the whole import.
-            continue
+    rec = peek_jsonl(path, MEMBER)
+    return rec is not None and _is_llm_memex_arkiv_record(rec)
 
 
 # ── reconstruction ─────────────────────────────────────────────
@@ -238,7 +103,7 @@ def import_path(path: str) -> List[Conversation]:
     # Group records by conversation_id. Each bucket preserves record order
     # for stable message sequencing when timestamps tie.
     buckets: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
-    for idx, rec in enumerate(_open_jsonl(path)):
+    for idx, rec in enumerate(iter_jsonl(path, MEMBER)):
         meta = rec.get("metadata") or {}
         cid = meta.get("conversation_id")
         if not cid:

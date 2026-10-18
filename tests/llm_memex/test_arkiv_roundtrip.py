@@ -530,12 +530,13 @@ class TestSchemaExampleDeterminism:
         json.dumps(example)  # must be JSON-serializable, raises otherwise
 
 
-# ── EXP-3: tar.gz export must be byte-reproducible ─────────────
+# ── EXP-3: bundle exports must be byte-reproducible ────────────
 
 class TestTarGzReproducible:
-    def test_two_tar_gz_exports_are_byte_identical(self, tmp_path):
-        out1 = tmp_path / "a.tar.gz"
-        out2 = tmp_path / "b.tar.gz"
+    @pytest.mark.parametrize("ext", ["tar.gz", "zip"])
+    def test_two_exports_are_byte_identical(self, tmp_path, ext):
+        out1 = tmp_path / f"a.{ext}"
+        out2 = tmp_path / f"b.{ext}"
         arkiv_export([_seed_conversation()], str(out1))
         arkiv_export([_seed_conversation()], str(out2))
         assert out1.read_bytes() == out2.read_bytes()

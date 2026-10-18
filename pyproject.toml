@@ -23,6 +23,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    # Bundle I/O (write_bundle / iter_jsonl) for the arkiv exporter and importer.
+    "arkiv>=0.4",
     "fastmcp<3",
     "pyyaml",
     # mcp.py imports pydantic.Field directly. It arrives transitively via

@@ -10,29 +10,16 @@ the file extension of ``path``. All three layouts contain the same files:
 Compression choice prioritizes longevity: ``.zip`` and ``.tar.gz`` are both
 ubiquitous (every OS and scripting language has supported them for 30+ years).
 """
-import gzip
 import io
 import json
-import os
-import tarfile
-import zipfile
 from datetime import date
 from typing import Any, Dict, List
 
+from arkiv import records_to_jsonl, write_bundle
+
 from llm_memex.models import Conversation
 
-
-def _detect_compression(path: str) -> str:
-    """Infer output format from *path*'s extension.
-
-    Returns one of: ``"zip"``, ``"tar.gz"``, ``"dir"``.
-    """
-    lower = path.lower()
-    if lower.endswith(".zip"):
-        return "zip"
-    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
-        return "tar.gz"
-    return "dir"
+MEMBER = "conversations.jsonl"
 
 
 def export(conversations: List[Conversation], path: str, **kwargs) -> None:
@@ -55,77 +42,13 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     db = kwargs.get("db")
     records = _build_records(conversations, include_notes=include_notes, db=db)
 
-    jsonl_bytes = _records_to_jsonl_bytes(records)
-    schema_bytes = _schema_yaml_bytes(
-        _compute_schema(records), record_count=len(records)
-    )
-    readme_bytes = _readme_bytes(num_conversations=len(conversations))
-
-    kind = _detect_compression(path)
-    if kind == "zip":
-        _write_zip(path, jsonl_bytes, schema_bytes, readme_bytes)
-    elif kind == "tar.gz":
-        _write_tar_gz(path, jsonl_bytes, schema_bytes, readme_bytes)
-    else:
-        os.makedirs(path, exist_ok=True)
-        _write_file(os.path.join(path, "conversations.jsonl"), jsonl_bytes)
-        _write_file(os.path.join(path, "schema.yaml"), schema_bytes)
-        _write_file(os.path.join(path, "README.md"), readme_bytes)
-
-
-def _records_to_jsonl_bytes(records: List[Dict[str, Any]]) -> bytes:
-    buf = io.StringIO()
-    for rec in records:
-        buf.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return buf.getvalue().encode("utf-8")
-
-
-def _write_file(path: str, data: bytes) -> None:
-    with open(path, "wb") as f:
-        f.write(data)
-
-
-def _write_zip(
-    path: str, jsonl: bytes, schema_yaml: bytes, readme: bytes
-) -> None:
-    """Write the three bundle files into a single .zip archive."""
-    # DEFLATE is the universally-supported compressor; good text ratio.
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("conversations.jsonl", jsonl)
-        zf.writestr("schema.yaml", schema_yaml)
-        zf.writestr("README.md", readme)
-
-
-def _write_tar_gz(
-    path: str, jsonl: bytes, schema_yaml: bytes, readme: bytes
-) -> None:
-    """Write the three bundle files into a single .tar.gz archive.
-
-    The output is byte-reproducible: ``tarfile.open(path, "w:gz")`` would stamp
-    the current wall-clock time into the gzip header, so two exports of
-    identical data would differ. We instead drive a ``gzip.GzipFile`` with
-    ``mtime=0`` (fixed gzip header) and set every ``TarInfo.mtime`` to 0 (fixed
-    per-member timestamps), making the bundle deterministic. The .zip path is
-    already deterministic (zipfile uses a fixed default date), so this brings
-    .tar.gz to parity.
-    """
-    with open(path, "wb") as raw:
-        # mtime=0 zeroes the timestamp field in the gzip header. filename=""
-        # suppresses the FNAME field, which GzipFile would otherwise populate
-        # from ``raw.name`` (the output path), leaking the file name into the
-        # header and breaking byte-reproducibility across differently-named
-        # outputs of identical data.
-        with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w") as tf:
-                for name, data in (
-                    ("conversations.jsonl", jsonl),
-                    ("schema.yaml", schema_yaml),
-                    ("README.md", readme),
-                ):
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(data)
-                    info.mtime = 0  # fixed per-member timestamp
-                    tf.addfile(info, io.BytesIO(data))
+    write_bundle(path, {
+        MEMBER: records_to_jsonl(records),
+        "schema.yaml": _schema_yaml_bytes(
+            _compute_schema(records), record_count=len(records)
+        ),
+        "README.md": _readme_bytes(num_conversations=len(conversations)),
+    })
 
 
 def _build_records(
