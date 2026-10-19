@@ -153,6 +153,59 @@ class TestCLIImportProvenance:
         db.close()
 
 
+class TestCLIImporterRevision:
+    """importer_version records which importer revision read each conversation,
+    so an importer fix re-imports exactly what it would now read differently."""
+
+    def _openai_file(self, path):
+        path.write_text(json.dumps([{
+            "id": "c1", "title": "Test",
+            "create_time": 1700000000, "update_time": 1700000001,
+            "mapping": {"m1": {
+                "id": "m1", "parent": None, "children": [],
+                "message": {"id": "m1", "author": {"role": "user"},
+                            "content": {"parts": ["hello"]},
+                            "create_time": 1700000000},
+            }},
+        }]))
+
+    def _import(self, export_file, db_dir):
+        return subprocess.run(
+            [sys.executable, "-m", "llm_memex", "import", str(export_file),
+             "--db", str(db_dir)],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_every_builtin_importer_declares_a_revision(self):
+        from llm_memex.cli import _discover_importers
+        for name, info in _discover_importers().items():
+            rev = getattr(info["module"], "IMPORTER_REVISION", None)
+            assert isinstance(rev, int) and rev >= 1, name
+
+    def test_import_records_importer_version(self, tmp_path):
+        from llm_memex.db import Database
+        from llm_memex.importers import openai
+        export_file, db_dir = tmp_path / "export.json", tmp_path / "db"
+        self._openai_file(export_file)
+        self._import(export_file, db_dir)
+        with Database(str(db_dir)) as db:
+            prov = db.get_provenance("c1")
+        assert prov[0]["importer_version"] == f"openai@{openai.IMPORTER_REVISION}"
+
+    def test_older_importer_revision_is_reimported(self, tmp_path):
+        from llm_memex.db import Database
+        export_file, db_dir = tmp_path / "export.json", tmp_path / "db"
+        self._openai_file(export_file)
+        self._import(export_file, db_dir)
+        with Database(str(db_dir)) as db:
+            db.conn.execute("UPDATE provenance SET importer_version='openai@0'")
+            db.conn.commit()
+        result = self._import(export_file, db_dir)
+        assert "Imported 1 conversation(s)" in result.stdout
+        # ...and the re-import brings the row up to date, so the next is a no-op.
+        assert "1 unchanged" in self._import(export_file, db_dir).stdout
+
+
 class TestCLIImportRecursive:
     """Tests for memex import --recursive directory import."""
 

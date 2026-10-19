@@ -22,6 +22,11 @@ from llm_memex.importers._claude_code_common import (
     MessageTreeBuilder,
 )
 
+# Bump when a change makes this importer read the same source differently;
+# conversations stamped with an older revision are re-imported (cli.py).
+# 2: records the session's cwd, git branch and client version.
+IMPORTER_REVISION = 2
+
 
 def import_path(path: str) -> List[Conversation]:
     """Import a Claude Code JSONL session file or directory of sessions.

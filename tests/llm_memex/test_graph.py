@@ -41,7 +41,7 @@ def seeded_db(db):
 
 class TestSchema:
     def test_schema_version(self):
-        assert SCHEMA_VERSION == 7
+        assert SCHEMA_VERSION == 8
 
     def test_fresh_db_has_no_edges_table(self, db):
         """v7 removed edges; cross-record graphs live in memex, not here."""

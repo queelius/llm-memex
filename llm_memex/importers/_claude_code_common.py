@@ -13,6 +13,15 @@ from llm_memex.models import Conversation, Message
 
 logger = logging.getLogger(__name__)
 
+# The on-disk layout both importers parse, recorded in provenance.source_format.
+# A future incompatible layout gets its own id ("claude-code-jsonl/2"), chosen
+# from the records' structure, never from the client version string.
+SOURCE_FORMAT = "claude-code-jsonl/1"
+
+# Session-context fields copied from extract_session_metadata into
+# conversation metadata.
+SESSION_CONTEXT_KEYS = ("cwd", "git_branch", "client_version")
+
 # Event types that Claude Code uses (for detection)
 KNOWN_EVENT_TYPES = {
     "user", "assistant", "system", "progress",
@@ -160,19 +169,32 @@ def parse_records(path: str) -> List[Dict[str, Any]]:
 def extract_session_metadata(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Extract session-level metadata from records.
 
-    Returns dict with keys: session_id, slug, first_ts, last_ts, model.
+    Returns dict with keys: session_id, slug, first_ts, last_ts, model, and the
+    session context cwd, git_branch, client_version. cwd and git_branch are the
+    first values seen (where the session started, which is also the project
+    directory Claude Code files it under); client_version is the last (the
+    newest client that wrote to it, since a resumed session can span upgrades).
     """
     session_id = None
     slug = None
     first_ts = None
     last_ts = None
     model = None
+    cwd = None
+    git_branch = None
+    client_version = None
 
     for rec in records:
         if session_id is None and rec.get("sessionId"):
             session_id = rec["sessionId"]
         if slug is None and rec.get("slug"):
             slug = rec["slug"]
+        if cwd is None and isinstance(rec.get("cwd"), str) and rec["cwd"]:
+            cwd = rec["cwd"]
+        if git_branch is None and isinstance(rec.get("gitBranch"), str) and rec["gitBranch"]:
+            git_branch = rec["gitBranch"]
+        if isinstance(rec.get("version"), str) and rec["version"]:
+            client_version = rec["version"]
         if rec.get("timestamp"):
             ts = rec["timestamp"]
             if first_ts is None:
@@ -189,6 +211,9 @@ def extract_session_metadata(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "first_ts": first_ts,
         "last_ts": last_ts,
         "model": model,
+        "cwd": cwd,
+        "git_branch": git_branch,
+        "client_version": client_version,
     }
 
 
@@ -229,8 +254,14 @@ def build_conversation(
         "source_type": source_type,
         "source_file": path,
         "source_id": session_id,
+        "source_format": SOURCE_FORMAT,
     }
     conv.metadata["importer_mode"] = importer_mode
+    # Session context, queryable as json_extract(metadata, '$.cwd'). Absent
+    # fields are left out rather than stored as null.
+    for key in SESSION_CONTEXT_KEYS:
+        if meta.get(key):
+            conv.metadata[key] = meta[key]
 
     return conv
 

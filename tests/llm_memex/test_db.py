@@ -129,6 +129,27 @@ class TestSchemaVersioning:
         assert len(rows) == 1
         assert rows[0]["version"] == SCHEMA_VERSION
 
+    def test_v7_db_gains_provenance_source_format(self, tmp_db_path):
+        """v8 adds provenance.source_format to an existing v7 database."""
+        from llm_memex.db import SCHEMA_VERSION
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        db.save_provenance("c1", source_type="openai", source_file="x.json")
+        db.close()
+        raw = sqlite3.connect(str(Path(tmp_db_path) / "conversations.db"))
+        raw.execute("ALTER TABLE provenance DROP COLUMN source_format")
+        raw.execute("UPDATE schema_version SET version=7")
+        raw.commit()
+        raw.close()
+        db2 = Database(tmp_db_path)
+        cols = {r["name"] for r in db2.execute_sql("PRAGMA table_info(provenance)")}
+        version = db2.execute_sql("SELECT version FROM schema_version")[0]["version"]
+        prov = db2.get_provenance("c1")
+        db2.close()
+        assert "source_format" in cols
+        assert version == SCHEMA_VERSION
+        assert prov[0]["source_file"] == "x.json" and prov[0]["source_format"] is None
+
     def test_schema_version_filtered_from_schema(self, tmp_db_path):
         """schema_version is internal bookkeeping, filtered from get_schema() output."""
         db = Database(tmp_db_path)
@@ -895,6 +916,41 @@ class TestProvenance:
         db.save_provenance("c1", source_type="anthropic")
         prov = db.get_provenance("c1")
         assert len(prov) == 2
+
+    def test_source_format_and_importer_version_round_trip(self, tmp_db_path):
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        db.save_provenance(
+            "c1", source_type="codex", source_format="codex-rollout/2",
+            importer_version="codex@1",
+        )
+        prov = db.get_provenance("c1")
+        db.close()
+        assert prov[0]["source_format"] == "codex-rollout/2"
+        assert prov[0]["importer_version"] == "codex@1"
+
+    def test_unchanged_requires_current_importer_version(self, tmp_db_path):
+        """A row written by an older importer revision is stale even when its
+        timestamps and message count match, so an importer fix re-imports it."""
+        conv = _make_conv()
+        db = Database(tmp_db_path)
+        db.save_conversation(conv)
+        db.save_provenance("c1", source_type="codex", importer_version="codex@1")
+        same = (conv.updated_at, conv.message_count)
+        assert db.conversation_unchanged(
+            "c1", *same, source_type="codex", importer_version="codex@1"
+        )
+        assert not db.conversation_unchanged(
+            "c1", *same, source_type="codex", importer_version="codex@2"
+        )
+        # A provenance row from before importer versions were recorded is stale.
+        db.save_provenance("c1", source_type="codex", importer_version=None)
+        assert not db.conversation_unchanged(
+            "c1", *same, source_type="codex", importer_version="codex@1"
+        )
+        # Callers that carry no provenance (arkiv round-trips) keep the old check.
+        assert db.conversation_unchanged("c1", *same)
+        db.close()
 
     def test_cascade_on_conversation_delete(self, tmp_db_path):
         db = Database(tmp_db_path)

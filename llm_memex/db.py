@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llm_memex.models import Conversation, Message
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS conversations (
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS provenance (
     source_hash TEXT,
     imported_at DATETIME NOT NULL,
     importer_version TEXT,
+    source_format TEXT,
     PRIMARY KEY (conversation_id, source_type)
 );
 CREATE TABLE IF NOT EXISTS notes (
@@ -339,6 +340,26 @@ def _migrate_to_v7(conn):
     conn.commit()
 
 
+def _migrate_to_v8(conn):
+    """Add provenance.source_format.
+
+    Records which on-disk layout of the source an importer parsed (e.g.
+    ``codex-rollout/2``). Together with ``importer_version`` (the importer's
+    own revision, written for every import from v8 on) it lets a fixed or
+    extended importer find and re-import exactly the conversations it read
+    under an older revision or layout. Existing rows get NULL; the importer
+    treats a NULL ``importer_version`` as stale, so the next import of each
+    source backfills both columns.
+    """
+    # A pre-versioning DB is bootstrapped by creating missing tables from the
+    # current SCHEMA_SQL (which already has the column) and then replaying
+    # every migration, so the column may exist by the time this runs.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(provenance)")}
+    if "source_format" not in cols:
+        conn.execute("ALTER TABLE provenance ADD COLUMN source_format TEXT")
+    conn.commit()
+
+
 MIGRATIONS: Dict[int, callable] = {
     1: _migrate_to_v2,
     2: _migrate_to_v3,
@@ -346,6 +367,7 @@ MIGRATIONS: Dict[int, callable] = {
     4: _migrate_to_v5,
     5: _migrate_to_v6,
     6: _migrate_to_v7,
+    7: _migrate_to_v8,
 }
 
 
@@ -687,15 +709,42 @@ class Database:
 -- Filter: WHERE starred_at IS NOT NULL (starred conversations)"""
         return ddl + docs
 
-    def conversation_unchanged(self, conv_id: str, updated_at, message_count: int) -> bool:
-        """Fast check: does this conversation already exist with matching fields?"""
+    def conversation_unchanged(
+        self,
+        conv_id: str,
+        updated_at,
+        message_count: int,
+        *,
+        source_type: str | None = None,
+        importer_version: str | None = None,
+    ) -> bool:
+        """Fast check: does this conversation already exist with matching fields?
+
+        When *source_type* is given, the stored provenance for that source must
+        also record *importer_version*: a conversation read by an older
+        importer revision (or before revisions were recorded, NULL) is stale
+        even if its timestamps and message count match, so an importer fix
+        re-imports exactly what it would now read differently.
+        """
         row = self.conn.execute(
             "SELECT updated_at, message_count FROM conversations WHERE id=?",
             (conv_id,),
         ).fetchone()
         if row is None:
             return False
-        return row["updated_at"] == _fmt_dt(updated_at) and row["message_count"] == message_count
+        if not (
+            row["updated_at"] == _fmt_dt(updated_at)
+            and row["message_count"] == message_count
+        ):
+            return False
+        if source_type is None:
+            return True
+        prov = self.conn.execute(
+            "SELECT importer_version FROM provenance "
+            "WHERE conversation_id=? AND source_type=?",
+            (conv_id, source_type),
+        ).fetchone()
+        return prov is not None and prov["importer_version"] == importer_version
 
     def save_conversation(self, conv: Conversation) -> None:
         c = self.conn.cursor()
@@ -1706,17 +1755,19 @@ class Database:
         source_id: str | None = None,
         source_hash: str | None = None,
         importer_version: str | None = None,
+        source_format: str | None = None,
     ) -> None:
         now = imported_at or _fmt_dt(datetime.now())
         try:
             self.conn.execute(
                 "INSERT OR REPLACE INTO provenance "
                 "(conversation_id,source_type,source_file,source_id,"
-                "source_hash,imported_at,importer_version) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "source_hash,imported_at,importer_version,source_format) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (
                     conversation_id, source_type, source_file,
                     source_id, source_hash, now, importer_version,
+                    source_format,
                 ),
             )
             self.conn.commit()
@@ -1727,7 +1778,7 @@ class Database:
     def get_provenance(self, conversation_id: str) -> List[Dict[str, Any]]:
         return self.execute_sql(
             "SELECT source_type,source_file,source_id,source_hash,"
-            "imported_at,importer_version "
+            "imported_at,importer_version,source_format "
             "FROM provenance WHERE conversation_id=?",
             (conversation_id,),
         )

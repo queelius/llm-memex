@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional
 from llm_memex.importers import detect_model, parse_timestamp
 from llm_memex.models import Conversation, Message, media_block, text_block
 
+# Bump when a change makes this importer read the same source differently;
+# conversations stamped with an older revision are re-imported (cli.py).
+IMPORTER_REVISION = 1
+
 
 def detect(path: str) -> bool:
     """Check if file is a Gemini conversation export."""

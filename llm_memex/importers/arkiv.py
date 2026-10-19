@@ -50,6 +50,10 @@ from arkiv import iter_jsonl, peek_jsonl
 from llm_memex.exporters.arkiv_export import MEMBER
 from llm_memex.models import Conversation, Message, text_block
 
+# Bump when a change makes this importer read the same source differently;
+# conversations stamped with an older revision are re-imported (cli.py).
+IMPORTER_REVISION = 1
+
 
 # ── detection ──────────────────────────────────────────────────
 

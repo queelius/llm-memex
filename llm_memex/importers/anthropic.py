@@ -15,6 +15,10 @@ from llm_memex.models import (
     tool_use_block,
 )
 
+# Bump when a change makes this importer read the same source differently;
+# conversations stamped with an older revision are re-imported (cli.py).
+IMPORTER_REVISION = 1
+
 
 def detect(path: str) -> bool:
     """Check if file is an Anthropic conversation export."""

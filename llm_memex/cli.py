@@ -322,6 +322,8 @@ def _save_convs(convs, source_path, args, db):
                     source_file=prov.get("source_file"),
                     source_id=prov.get("source_id"),
                     source_hash=prov.get("source_hash"),
+                    importer_version=prov.get("importer_version"),
+                    source_format=prov.get("source_format"),
                 )
             if stats["created_conversation"] or stats["added_messages"] or stats["added_tags"]:
                 imported += 1
@@ -330,14 +332,20 @@ def _save_convs(convs, source_path, args, db):
             _materialize_arkiv_notes(conv, db)
             continue
 
-        # Skip-if-unchanged check (bypass with --force)
+        # Skip-if-unchanged check (bypass with --force). With provenance, a
+        # row read by an older importer revision counts as changed.
+        prov = conv.metadata.pop("_provenance", None)
+        prov_check = (
+            {"source_type": prov.get("source_type", "unknown"),
+             "importer_version": prov.get("importer_version")}
+            if prov else {}
+        )
         if not args.force and db.conversation_unchanged(
-            conv.id, conv.updated_at, conv.message_count
+            conv.id, conv.updated_at, conv.message_count, **prov_check
         ):
             unchanged += 1
             continue
 
-        prov = conv.metadata.pop("_provenance", None)
         if not args.no_copy_assets:
             source_type = prov.get("source_type", "") if prov else ""
             resolve_source_assets(conv, source_dir, source_type)
@@ -360,6 +368,8 @@ def _save_convs(convs, source_path, args, db):
                 source_file=prov.get("source_file"),
                 source_id=prov.get("source_id"),
                 source_hash=prov.get("source_hash"),
+                importer_version=prov.get("importer_version"),
+                source_format=prov.get("source_format"),
             )
         imported += 1
 
@@ -448,21 +458,39 @@ def _discover_exporters():
     )
 
 
-def _run_import_path(module, file_path, exit_on_fail):
+def _importer_version(name, module):
+    """``<importer>@<IMPORTER_REVISION>`` for a discovered importer module.
+
+    Every built-in importer declares an integer ``IMPORTER_REVISION``, bumped
+    whenever a change makes it read the same source differently. A user
+    plugin that declares none gets None, which keeps the plain
+    timestamp/message-count unchanged check for it.
+    """
+    rev = getattr(module, "IMPORTER_REVISION", None)
+    return None if rev is None else f"{name}@{rev}"
+
+
+def _run_import_path(name, module, file_path, exit_on_fail):
     """Call a module's import_path, converting failures to exit (or None).
 
-    On success returns the imported conversations. On exception, prints an
-    error and exits when exit_on_fail, otherwise prints a warning and returns
-    None.
+    On success returns the imported conversations, each provenance record
+    stamped with the importer's version. On exception, prints an error and
+    exits when exit_on_fail, otherwise prints a warning and returns None.
     """
     try:
-        return module.import_path(file_path)
+        convs = module.import_path(file_path)
     except Exception as e:
         if exit_on_fail:
             print(f"Error: failed to import {file_path}: {e}", file=sys.stderr)
             sys.exit(1)
         print(f"Warning: failed to import {file_path}: {e}", file=sys.stderr)
         return None
+    version = _importer_version(name, module)
+    for conv in convs or []:
+        prov = conv.metadata.get("_provenance")
+        if isinstance(prov, dict):
+            prov.setdefault("importer_version", version)
+    return convs
 
 
 def _auto_import(file_path, format_name=None, exit_on_fail=True):
@@ -477,7 +505,9 @@ def _auto_import(file_path, format_name=None, exit_on_fail=True):
                   f"Available: {', '.join(sorted(importers))}",
                   file=sys.stderr)
             sys.exit(1)
-        return _run_import_path(importers[format_name]["module"], file_path, exit_on_fail)
+        return _run_import_path(
+            format_name, importers[format_name]["module"], file_path, exit_on_fail
+        )
     # Preferred order: claude_code_full wins over claude_code when both
     # detect (both share the same detect function, so otherwise the
     # alphabetically-earlier skeleton importer would always win).
@@ -490,7 +520,7 @@ def _auto_import(file_path, format_name=None, exit_on_fail=True):
         if info is None:
             continue
         if info["module"].detect(file_path):
-            return _run_import_path(info["module"], file_path, exit_on_fail)
+            return _run_import_path(name, info["module"], file_path, exit_on_fail)
     if exit_on_fail:
         print(f"Error: no importer found for {file_path}", file=sys.stderr)
         sys.exit(1)

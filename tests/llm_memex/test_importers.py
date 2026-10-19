@@ -1,4 +1,5 @@
 """Tests for memex importers: OpenAI, Anthropic, Gemini, Claude Code."""
+import pytest
 import json
 import math
 from datetime import datetime, timezone
@@ -801,6 +802,56 @@ class TestClaudeCodeImport:
 
 
 # ---------- Directory detection + import ----------
+
+@pytest.mark.parametrize(
+    "import_fn", [claude_code_import, claude_code_full_import],
+    ids=["conversation_only", "full"],
+)
+class TestClaudeCodeSessionContext:
+    """Where and with which client a session ran, so the catalog can be
+    filtered by project ("my llm-memex sessions") and re-read by layout."""
+
+    def _session(self, tmp_path, *, second_cwd="/work/proj", second_version="2.1.0"):
+        events = [
+            _cc_event("user", uuid="u1", cwd="/work/proj", gitBranch="main",
+                      version="2.0.0",
+                      message={"role": "user", "content": "hi"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1", cwd=second_cwd,
+                      gitBranch="feature", version=second_version,
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "hello"}]}),
+        ]
+        f = tmp_path / "session.jsonl"
+        _write_jsonl(f, events)
+        return f
+
+    def test_records_cwd_branch_and_client_version(self, tmp_path, import_fn):
+        conv = import_fn(str(self._session(tmp_path)))[0]
+        # cwd/branch: where the session started; version: the newest client
+        # that wrote to it (a resumed session can span upgrades).
+        assert conv.metadata["cwd"] == "/work/proj"
+        assert conv.metadata["git_branch"] == "main"
+        assert conv.metadata["client_version"] == "2.1.0"
+
+    def test_first_cwd_wins_when_session_moves(self, tmp_path, import_fn):
+        conv = import_fn(str(self._session(tmp_path, second_cwd="/elsewhere")))[0]
+        assert conv.metadata["cwd"] == "/work/proj"
+
+    def test_provenance_names_the_layout(self, tmp_path, import_fn):
+        conv = import_fn(str(self._session(tmp_path)))[0]
+        assert conv.metadata["_provenance"]["source_format"] == "claude-code-jsonl/1"
+
+    def test_absent_context_is_omitted_not_null(self, tmp_path, import_fn):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [
+            _cc_event("user", uuid="u1", message={"role": "user", "content": "hi"}),
+            _cc_event("assistant", uuid="a1", parent_uuid="u1",
+                      message={"role": "assistant", "model": "m",
+                               "content": [{"type": "text", "text": "yo"}]}),
+        ])
+        meta = import_fn(str(f))[0].metadata
+        assert not {"cwd", "git_branch", "client_version"} & meta.keys()
+
 
 class TestClaudeCodeDirectoryDetect:
     def test_directory_with_jsonl(self, tmp_path):

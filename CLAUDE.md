@@ -56,7 +56,7 @@ llm_memex/
   __init__.py          # version (single source of truth; pyproject.toml reads it dynamically)
   __main__.py          # python -m llm_memex
   models.py            # ContentBlock, Message, Conversation (tree)
-  db.py                # Database (raw sqlite3, WAL, FTS5, migrations, schema v7)
+  db.py                # Database (raw sqlite3, WAL, FTS5, migrations, schema v8)
   config.py            # YAML config, DatabaseRegistry (multi-database support)
   mcp.py               # FastMCP server (6 tools, 2 resources)
   assets.py            # Asset resolution, copying, media markdown rendering
@@ -85,20 +85,20 @@ llm_memex/
 - Convention-based plugins: importers have `detect()` + `import_path()`, exporters have `export()`, scripts have `register_args()` + `run()`. User overrides in `~/.memex/{importers,exporters,scripts}/`
 - FastMCP 2.x (pinned `<3`) with lifespan pattern for DB lifecycle
 - Cursor-based keyset pagination (base64-encoded updated_at + id)
-- Schema versioning: `schema_version` table + `MIGRATIONS` dict for forward migrations (current: v7)
+- Schema versioning: `schema_version` table + `MIGRATIONS` dict for forward migrations (current: v8)
 - Multi-database YAML config (`~/.memex/config.yaml`). Two independent write switches: `sql_write: true` (or `MEMEX_SQL_WRITE=true`) lets raw `execute_sql` write; a per-database `readonly: true` disables every write, structured tools included. By default the structured write tools (`update_conversations`, `append_message`, `add_note`) work and raw SQL is read-only
 - pyproject.toml version is dynamic from `llm_memex.__version__`
 
-## Database Schema (v7)
+## Database Schema (v8)
 
-Schema v7 migrations: v1→v2 (enrichments, provenance) → v3 (parent_conversation_id) → v4 (notes, notes_fts) → v5 (edges, marginalia v2) → v6 (drop trails, moved to memex federation layer) → v7 (drop edges, also moved to memex federation layer).
+Schema migrations: v1→v2 (enrichments, provenance) → v3 (parent_conversation_id) → v4 (notes, notes_fts) → v5 (edges, marginalia v2) → v6 (drop trails, moved to memex federation layer) → v7 (drop edges, also moved to memex federation layer) → v8 (`provenance.source_format`).
 
 **Core tables:**
 - `conversations`: PK `id`, boolean timestamps `starred_at`/`pinned_at`/`archived_at` (NULL=false, DATETIME=true), self-referential `parent_conversation_id`
 - `messages`: composite PK `(conversation_id, id)`, tree via `parent_id`, content as JSON array of content blocks
 - `tags`: PK `(conversation_id, tag)`
 - `enrichments`: PK `(conversation_id, type, value)`, types: summary|topic|importance|excerpt, sources: user|claude|heuristic
-- `provenance`: PK `(conversation_id, source_type)`, tracks import origin
+- `provenance`: PK `(conversation_id, source_type)`, tracks import origin: `source_file`, `source_id`, `importer_version` (`<importer>@<IMPORTER_REVISION>`), `source_format` (the on-disk layout parsed, e.g. `claude-code-jsonl/1`, `codex-rollout/2`)
 - `notes` (marginalia): polymorphic `target_kind` ('message' or 'conversation'), FK with `ON DELETE SET NULL` (orphan survival). Marginalia v2 fields: `kind` (default 'freeform'), `anchor_start`/`anchor_end` (character offsets), `anchor_hash` (drift detection), `parent_note_id` (threaded replies, CASCADE delete)
 
 **FTS5 virtual tables:**
@@ -162,8 +162,11 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 - FTS conversation filters (`query_conversations`, the `get_conversations` MCP tool) match via a correlated subquery (`c.id IN (SELECT DISTINCT conversation_id FROM messages_fts WHERE messages_fts MATCH ?)`) rather than materializing a capped id list. This avoids both the old silent `LIMIT 1000` truncation (newest matches were being dropped) and the host-parameter explosion of an `IN (?, ?, ...)` list
 - `execute_sql` is row-bounded against runaway results: the MCP tool requests `_MAX_SQL_ROWS` (10000) + 1 rows via `Database.execute_sql(..., max_rows=...)` (a `cursor.fetchmany`, not a full materialize) and raises a ToolError telling the caller to add a `LIMIT` if the cap is exceeded, so a missing `LIMIT` cannot stream an unbounded result set into the agent's context
 - `get_schema()` filters out FTS5 shadow tables and `schema_version` from output
-- `save_conversation` upserts the row in place (`INSERT ... ON CONFLICT(id) DO UPDATE`), then explicitly clears and rewrites the child rows (messages/tags/enrichments/provenance plus the `messages_fts` shadow rows). It deliberately avoids `INSERT OR REPLACE`, which deletes-then-reinserts the conversation row and so would fire `ON DELETE SET NULL`/CASCADE on anything referencing it (notes, and the self-referential `parent_conversation_id`). Notes are never deleted here and survive via `ON DELETE SET NULL`
+- `save_conversation` upserts the row in place (`INSERT ... ON CONFLICT(id) DO UPDATE`), then explicitly clears and rewrites the child rows (messages/enrichments/provenance plus the `messages_fts` shadow rows). Tags are not cleared (importer tags are added with `INSERT OR IGNORE`, so user tags survive), and user-owned columns are kept when the importer supplies NULL (`summary`, `starred_at`, `pinned_at`, `archived_at` via COALESCE; `sensitive` via MAX, so a re-import never clears it). It deliberately avoids `INSERT OR REPLACE`, which deletes-then-reinserts the conversation row and so would fire `ON DELETE SET NULL`/CASCADE on anything referencing it (notes, and the self-referential `parent_conversation_id`). Notes are never deleted here and survive via `ON DELETE SET NULL`
 - Importers set `conv.metadata["_provenance"]`. CLI pops it before save, writes to provenance table after (CASCADE-safe)
+- **Importer revisions.** Every built-in importer declares an integer `IMPORTER_REVISION`; `_run_import_path` stamps `importer_version = "<name>@<rev>"` into provenance. The unchanged check treats a stored older revision (or NULL, from before v8) as changed, so bumping the constant re-imports exactly the conversations that importer read. Bump it whenever a change makes the importer read the same source differently. A user plugin with no `IMPORTER_REVISION` keeps the plain timestamp/message-count check
+- **Source layouts are recognized by structure, never by client version.** An importer that reads several on-disk layouts picks the parser from the records' shape and records the layout in `_provenance["source_format"]`. Within a layout, unknown record types are counted and skipped, never fatal, so a client update adds a count to the import summary instead of breaking the daily backup
+- Claude Code conversations carry session context in metadata: `cwd` and `git_branch` (first seen: where the session started), `client_version` (last seen). Query with `json_extract(metadata, '$.cwd')`
 - Two Claude Code importers share `_claude_code_common.py`: `claude_code` (conversation_only, strips tool use/thinking) and `claude_code_full` (full fidelity). Both use `source="claude_code"`, differentiated by `importer_mode` metadata and provenance `source_type`
 - `claude_code_full` imports subagent files from `subagents/` directories with `parent_conversation_id` links; subagent IDs are `{sessionId}:{agentId}` (deterministic); `conversation_only` skips subagents entirely
 - FTS5 is NOT trigger-maintained: `messages_fts` is manually updated in `save_conversation`, `append_message`, `update_message_content`, `delete_conversation`. `notes_fts` is maintained by `add_note`, `update_note`, `delete_note`, and `delete_conversation` (which re-syncs the shadow rows of notes orphaned by `ON DELETE SET NULL` so they no longer point at the deleted conversation)
