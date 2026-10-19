@@ -1216,6 +1216,21 @@ class TestReimportIntegrity:
         db.close()
         assert row["starred_at"].startswith("2026-02-03")
 
+    def test_reimport_without_parent_keeps_existing_link(self, tmp_db_path):
+        """A child re-imported in a batch that lacks its parent (pruned source
+        file) must not lose the parent link made by an earlier import."""
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv("p"))
+        child = _make_conv("c")
+        child.parent_conversation_id = "p"
+        db.save_conversation(child)
+        db.save_conversation(_make_conv("c"))  # no parent supplied this time
+        row = db.conn.execute(
+            "SELECT parent_conversation_id FROM conversations WHERE id='c'"
+        ).fetchone()
+        db.close()
+        assert row["parent_conversation_id"] == "p"
+
     def test_reimport_keeps_user_tags(self, tmp_db_path):
         db = Database(tmp_db_path)
         db.save_conversation(_make_conv())

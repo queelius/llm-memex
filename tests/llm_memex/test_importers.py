@@ -2137,7 +2137,8 @@ class TestCodexImportLayout2:
 
     def test_message_ids_are_thread_segment_ordinal(self, tmp_path):
         conv = self._conv(tmp_path)
-        assert list(conv.messages) == ["th-1:0:4", "th-1:0:9"]
+        seg = "2026-07-01T10:00:00Z"  # the segment's own session_meta timestamp
+        assert list(conv.messages) == [f"th-1:{seg}:o4", f"th-1:{seg}:o9"]
 
     def test_title_falls_back_to_first_human_message(self, tmp_path):
         assert self._conv(tmp_path).title == "Fix the failing test please"
@@ -2185,25 +2186,63 @@ class TestCodexImportLayout2:
         assert "tab\tHERE" in texts
 
 
-class TestCodexInjectedContext:
+class TestCodexClientContext:
     @pytest.mark.parametrize("text", [
         "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
-        "<codex_internal_context>stuff</codex_internal_context>",
-        "  <heartbeat>tick</heartbeat>\n",
-        "<a-new-tag attr='1'>whatever</a-new-tag>",
+        "<codex_internal_context source=\"x\">\nstuff\n</codex_internal_context>",
+        "  <heartbeat>\ntick\n</heartbeat>\n",
+        "<a-new-tag>\nwhatever\n</a-new-tag>",
+        # AGENTS.md: a heading line, then the block (548 real titles were this).
+        "# AGENTS.md instructions for /work/proj\n\n<INSTRUCTIONS>\n- be terse\n</INSTRUCTIONS>",
+        "<outer>\n<outer>\nnested same name\n</outer>\n</outer>",
     ])
-    def test_single_element_is_injected(self, text):
-        assert codex_mod._is_injected_context(text)
+    def test_block_elements_are_client_context(self, text):
+        assert codex_mod._is_client_context(text, set())
 
     @pytest.mark.parametrize("text", [
         "Fix this <b>now</b>",
-        "<b>bold</b> start but more text",
-        "<a>one</a><b>two</b>",
+        "<div>hello world, why does this render wrong?</div>",
+        '<svg width="10"></svg>',
+        "<a>x</a> please compare with <a>y</a>",
+        "<a>\nx\n</a> please compare with <a>\ny\n</a>",
+        "<note>\nfirst\n</note>\nand my question\n<note>\nsecond\n</note>",
+        "<image name=[Image #1]>",
         "a < b and c > d",
         "<>",
+        "# Just a heading",
     ])
-    def test_human_text_is_not_injected(self, text):
-        assert not codex_mod._is_injected_context(text)
+    def test_human_text_is_not_client_context(self, text):
+        assert not codex_mod._is_client_context(text, set())
+
+    def test_ui_stream_record_overrides_shape(self):
+        reply = "<send_user_message_question_reply>\nyes, ship it\n</send_user_message_question_reply>"
+        assert codex_mod._is_client_context(reply, set())
+        assert not codex_mod._is_client_context(reply, {reply})
+
+    def test_import_keeps_submitted_block_and_drops_unsubmitted(self, tmp_path):
+        reply = "<send_user_message_question_reply>\nyes, ship it\n</send_user_message_question_reply>"
+        records = _cx_v2_session()
+        records += [
+            _cx("response_item", {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": reply}]}, 20),
+            _cx("event_msg", {"type": "item_completed", "item": {
+                "type": "UserMessage", "id": "z",
+                "content": [{"type": "text", "text": reply}]}}, 21),
+        ]
+        f = _cx_write(tmp_path / "r.jsonl", records)
+        texts = [m.get_text() for m in codex_import(str(f))[0].messages.values()]
+        assert reply in texts
+        assert not any("environment_context" in t for t in texts)
+
+    def test_agents_md_never_becomes_the_title(self, tmp_path):
+        records = _cx_v2_session()
+        records.insert(3, _cx("response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>"},
+        ]}, 30))
+        f = _cx_write(tmp_path / "r.jsonl", records)
+        conv = codex_import(str(f))[0]
+        assert conv.title == "Fix the failing test please"
+        assert not any("AGENTS.md" in m.get_text() for m in conv.messages.values())
 
 
 class TestCodexImportLayout1:
@@ -2241,7 +2280,8 @@ class TestCodexSplitThreads:
         # Second segment resumes at ordinal 3: its records reuse ordinals 3-4
         # with different content (measured on real split threads).
         second = [
-            _cx_meta("th-s", ordinal=3, cli_version="0.163.0"),
+            _cx_meta("th-s", ordinal=3, cli_version="0.163.0",
+                     timestamp="2026-10-15T00:00:00Z"),
             _cx_msg("user", "q2 (resumed)", 4), _cx_msg("assistant", "a2 (resumed)", 5),
         ]
         _cx_write(day / "rollout-2026-10-13T00-00-00-th-s.jsonl", first)
@@ -2254,9 +2294,10 @@ class TestCodexSplitThreads:
         msgs = convs[0].messages
         assert len(msgs) == 6
         # Resumed branch forks from a1, the last message before ordinal 3.
-        assert msgs["th-s:1:4"].parent_id == "th-s:0:2"
-        assert msgs["th-s:0:3"].parent_id == "th-s:0:2"
-        assert msgs["th-s:1:5"].parent_id == "th-s:1:4"
+        s0, s1 = "th-s:2026-07-01T10:00:00Z", "th-s:2026-10-15T00:00:00Z"
+        assert msgs[f"{s1}:o4"].parent_id == f"{s0}:o2"
+        assert msgs[f"{s0}:o3"].parent_id == f"{s0}:o2"
+        assert msgs[f"{s1}:o5"].parent_id == f"{s1}:o4"
 
     def test_split_thread_metadata(self, tmp_path):
         conv = codex_import(str(self._split(tmp_path)))[0]
@@ -2269,9 +2310,67 @@ class TestCodexSplitThreads:
         sessions = self._split(tmp_path)
         before = set(codex_import(str(sessions))[0].messages)
         _cx_write(sessions / "2026" / "10" / "17" / "rollout-2026-10-17T00-00-00-th-s.jsonl",
-                  [_cx_meta("th-s", ordinal=6), _cx_msg("user", "q3", 6)])
+                  [_cx_meta("th-s", ordinal=6, timestamp="2026-10-17T00:00:00Z"),
+                   _cx_msg("user", "q3", 6)])
         after = set(codex_import(str(sessions))[0].messages)
         assert before < after
+
+
+    def test_single_segment_import_assembles_the_whole_thread(self, tmp_path):
+        """Importing one file (or the cron's per-file fallback) must not replace
+        a split thread with part of itself or renumber its messages."""
+        sessions = self._split(tmp_path)
+        whole = codex_import(str(sessions))[0]
+        one_file = next((sessions / "2026" / "10" / "15").glob("*.jsonl"))
+        part = codex_import(str(one_file))[0]
+        assert set(part.messages) == set(whole.messages)
+        sub = codex_import(str(sessions / "2026" / "10" / "13"))[0]
+        assert set(sub.messages) == set(whole.messages)
+
+    def test_segment_in_another_layout_is_kept(self, tmp_path):
+        day = tmp_path / "sessions" / "2025" / "10" / "01"
+        _cx_write(day / "rollout-2025-10-01T00-00-00-mix.jsonl", [
+            {"id": "mix", "timestamp": "2025-10-01T00:00:00Z", "instructions": None},
+            {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "old q"}]},
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "old a"}]},
+        ])
+        _cx_write(day / "rollout-2025-10-02T00-00-00-mix.jsonl", [
+            _cx_meta("mix", ordinal=5, timestamp="2025-10-02T00:00:00Z"),
+            _cx_msg("user", "new q", 6),
+        ])
+        conv = codex_import(str(tmp_path / "sessions"))[0]
+        assert sorted(m.get_text() for m in conv.messages.values()) == [
+            "new q", "old a", "old q"]
+        new_q = next(m for m in conv.messages.values() if m.get_text() == "new q")
+        assert conv.messages[new_q.parent_id].get_text() == "old a"
+        assert conv.metadata["_provenance"]["source_format"] == \
+            "codex-rollout/1+codex-rollout/2"
+
+    def test_mixed_and_repeated_ordinals_never_collide(self, tmp_path):
+        records = [_cx_meta("dup"), _cx_msg("user", "u1", 1), _cx_msg("assistant", "a1", 2)]
+        no_ord = _cx_msg("user", "u2", 0)
+        del no_ord["ordinal"]
+        records += [no_ord, _cx_msg("assistant", "a2", 2)]  # ordinal 2 repeated
+        conv = codex_import(str(_cx_write(tmp_path / "r.jsonl", records)))[0]
+        assert len(conv.messages) == 4
+        for m in conv.messages.values():
+            assert m.parent_id != m.id
+        roots = [m for m in conv.messages.values() if m.parent_id is None]
+        assert len(roots) == 1
+
+    def test_one_failing_thread_does_not_sink_the_batch(self, tmp_path, monkeypatch):
+        _cx_write(tmp_path / "a.jsonl", _cx_v2_session("good"))
+        _cx_write(tmp_path / "b.jsonl", _cx_v2_session("bad"))
+        real = codex_mod._import_thread
+
+        def flaky(paths, skipped):
+            if "b.jsonl" in paths[0]:
+                raise TypeError("an unforeseen shape")
+            return real(paths, skipped)
+        monkeypatch.setattr(codex_mod, "_import_thread", flaky)
+        assert [c.id for c in codex_import(str(tmp_path))] == ["good"]
 
 
 class TestCodexTitlesAndSubagents:

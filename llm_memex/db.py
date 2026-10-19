@@ -771,15 +771,18 @@ class Database:
                 "  summary=COALESCE(excluded.summary, conversations.summary),"
                 "  message_count=excluded.message_count,"
                 "  created_at=excluded.created_at, updated_at=excluded.updated_at,"
-                # Same rule for the user's flags: importers (other than an
-                # arkiv round-trip) never carry star/pin/archive state, so a
-                # NULL from the importer means "unknown", not "cleared". And
-                # a re-import can never clear a sensitive flag; only the user
-                # can, via update_conversations.
+                # Same rule for the user's flags: no importer carries
+                # star/pin/archive state (the arkiv round-trip does not either),
+                # so a NULL from the importer means "unknown", not "cleared".
+                # A re-import can never clear a sensitive flag; only the user
+                # can, via update_conversations. And a parent link made by an
+                # earlier import survives a batch that lacks the parent (its
+                # source file was pruned).
                 "  starred_at=COALESCE(excluded.starred_at, conversations.starred_at),"
                 "  pinned_at=COALESCE(excluded.pinned_at, conversations.pinned_at),"
                 "  archived_at=COALESCE(excluded.archived_at, conversations.archived_at),"
-                "  parent_conversation_id=excluded.parent_conversation_id,"
+                "  parent_conversation_id=COALESCE(excluded.parent_conversation_id,"
+                "    conversations.parent_conversation_id),"
                 "  sensitive=MAX(excluded.sensitive, conversations.sensitive),"
                 "  metadata=excluded.metadata",
                 (
