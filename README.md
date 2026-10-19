@@ -1,6 +1,6 @@
 # llm-memex
 
-Personal conversation knowledge base. Import, search, and analyze conversations from ChatGPT, Claude, Gemini, and Claude Code. MCP-first for LLM agent access.
+Personal conversation knowledge base. Import, search, and analyze conversations from ChatGPT, Claude, Gemini, Claude Code, and Codex. MCP-first for LLM agent access.
 
 ## Install
 
@@ -21,6 +21,7 @@ pip install -e ".[dev]"
 ```bash
 llm-memex import conversations.json          # auto-detects format
 llm-memex import ~/.claude/projects/          # directory of Claude Code sessions
+llm-memex import ~/.codex/sessions/           # directory of Codex CLI sessions
 llm-memex import export.json --format openai  # force format
 ```
 
@@ -66,6 +67,7 @@ llm-memex run enrich_trivial --apply
 | Gemini                | Yes    | -      | JSON export |
 | Claude Code           | Yes    | -      | JSONL, conversation-only mode |
 | Claude Code (full)    | Yes    | -      | Full fidelity: tool_use, thinking, subagents |
+| Codex CLI             | Yes    | -      | Rollout JSONL (both layouts), conversation-only; split threads become branches, subagents linked to parents |
 | Markdown              | -      | Yes    | |
 | JSON                  | -      | Yes    | |
 | HTML (SPA)            | -      | Yes    | Self-contained, light/dark, librarian chat |

@@ -206,6 +206,53 @@ class TestCLIImporterRevision:
         assert "1 unchanged" in self._import(export_file, db_dir).stdout
 
 
+class TestCLIImportCodex:
+    def _sessions(self, tmp_path):
+        day = tmp_path / ".codex" / "sessions" / "2026" / "07" / "01"
+        day.mkdir(parents=True)
+
+        def rec(t, payload, n):
+            return json.dumps({"timestamp": "2026-07-01T10:00:00Z", "type": t,
+                               "payload": payload, "ordinal": n})
+
+        def thread(tid, source="cli"):
+            return "\n".join([
+                rec("session_meta", {"id": tid, "timestamp": "2026-07-01T10:00:00Z",
+                                     "cwd": "/w", "cli_version": "0.1",
+                                     "source": source}, 0),
+                rec("response_item", {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": f"hi from {tid}"}]}, 1),
+                rec("response_item", {"type": "message", "role": "assistant",
+                                      "content": [{"type": "output_text",
+                                                   "text": "hello"}]}, 2),
+            ]) + "\n"
+        # The child's file sorts first; saving it first would violate the
+        # parent_conversation_id foreign key.
+        (day / "rollout-a-child.jsonl").write_text(thread("child", {"subagent": {
+            "thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}))
+        (day / "rollout-b-parent.jsonl").write_text(thread("parent"))
+        return tmp_path / ".codex" / "sessions"
+
+    def test_autodetect_import_and_noop_reimport(self, tmp_path):
+        from llm_memex.db import Database
+        sessions, db_dir = self._sessions(tmp_path), tmp_path / "db"
+        cmd = [sys.executable, "-m", "llm_memex", "import", str(sessions),
+               "--db", str(db_dir)]
+        first = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        assert "Imported 2 conversation(s)" in first.stdout
+        with Database(str(db_dir)) as db:
+            row = db.conn.execute(
+                "SELECT parent_conversation_id FROM conversations WHERE id='child'"
+            ).fetchone()
+            prov = db.get_provenance("parent")[0]
+        assert row["parent_conversation_id"] == "parent"
+        assert prov["source_format"] == "codex-rollout/2"
+        assert prov["importer_version"].startswith("codex@")
+        second = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        assert "Imported 0 conversation(s)" in second.stdout
+        assert "2 unchanged" in second.stdout
+
+
 class TestCLIImportRecursive:
     """Tests for memex import --recursive directory import."""
 

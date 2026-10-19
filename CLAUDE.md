@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Ecosystem Context
 
-This repo (`llm-memex/`) is one archive in the `*-memex` ecosystem at `~/github/memex/` (see `../CLAUDE.md`). It covers **AI chat conversations** (ChatGPT, Claude, Gemini, Claude Code). Trails and cross-archive features have moved to `memex/`. This archive is domain-focused: store, index, and expose conversations.
+This repo (`llm-memex/`) is one archive in the `*-memex` ecosystem at `~/github/memex/` (see `../CLAUDE.md`). It covers **AI chat conversations** (ChatGPT, Claude, Gemini, Claude Code, Codex). Trails and cross-archive features have moved to `memex/`. This archive is domain-focused: store, index, and expose conversations.
 
 ## Commands
 
@@ -25,6 +25,7 @@ pytest tests/llm_memex/ --cov=llm_memex --cov-report=term-missing
 # CLI
 llm-memex import conversations.json                   # auto-detect format
 llm-memex import ~/.claude/projects/ -r               # recursive directory import
+llm-memex import ~/.codex/sessions/                   # Codex CLI sessions (threads assembled across files)
 llm-memex import file.json --format openai            # force format
 llm-memex show                                        # list conversations
 llm-memex show <id>                                   # view conversation
@@ -72,6 +73,7 @@ llm_memex/
     openai.py, anthropic.py, gemini.py
     claude_code.py          # Claude Code JSONL (conversation_only mode)
     claude_code_full.py     # Claude Code JSONL (full fidelity: tool_use, thinking, tool_result)
+    codex.py                # Codex CLI rollout JSONL (conversation_only; layouts codex-rollout/1 and /2)
   exporters/           # Convention-based: export()
     markdown.py, json_export.py, arkiv_export.py
     html.py              # HTML SPA exporter (directory: index.html + DB + assets)
@@ -168,6 +170,8 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 - **Source layouts are recognized by structure, never by client version.** An importer that reads several on-disk layouts picks the parser from the records' shape and records the layout in `_provenance["source_format"]`. Within a layout, unknown record types are counted and skipped, never fatal, so a client update adds a count to the import summary instead of breaking the daily backup
 - Claude Code conversations carry session context in metadata: `cwd` and `git_branch` (first seen: where the session started), `client_version` (last seen). Query with `json_extract(metadata, '$.cwd')`
 - Two Claude Code importers share `_claude_code_common.py`: `claude_code` (conversation_only, strips tool use/thinking) and `claude_code_full` (full fidelity). Both use `source="claude_code"`, differentiated by `importer_mode` metadata and provenance `source_type`
+- `codex` reads only `response_item` messages (user/assistant). `event_msg` is a UI event stream that repeats the transcript, `developer` messages are instructions, and a user text part that is exactly one `<tag ...>...</tag>` element is client-injected context (checked by shape, not a tag list). Records are streamed: rollout files reach 2 GB
+- `codex` split threads: a thread spanning several rollout files is one conversation. A later file's opening `session_meta` ordinal is a fork point (its records reuse ordinals with different content), so it becomes a branch parented on the last message before the fork; message ids are `<thread>:<segment>:<ordinal>`. Subagent threads link to their parent via `parent_conversation_id` only when the parent is in the same import (FK); `metadata.parent_thread_id` always records it. Titles: `session_index.jsonl` name, else first human message, else `Subagent <nickname> (<role>)`
 - `claude_code_full` imports subagent files from `subagents/` directories with `parent_conversation_id` links; subagent IDs are `{sessionId}:{agentId}` (deterministic); `conversation_only` skips subagents entirely
 - FTS5 is NOT trigger-maintained: `messages_fts` is manually updated in `save_conversation`, `append_message`, `update_message_content`, `delete_conversation`. `notes_fts` is maintained by `add_note`, `update_note`, `delete_note`, and `delete_conversation` (which re-syncs the shadow rows of notes orphaned by `ON DELETE SET NULL` so they no longer point at the deleted conversation)
 - HTML SPA search uses `LIKE '%term%'` on raw `messages.content` JSON (no FTS5 in sql.js)

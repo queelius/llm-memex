@@ -2024,3 +2024,310 @@ class TestClaudeCodeNonUtf8:
         good = "\n".join(json.dumps(e) for e in events).encode("utf-8")
         f.write_bytes(good + b"\n" + b"\xff\xfe garbage\n")
         assert claude_code_detect(str(f)) is True
+
+
+# ── Codex ─────────────────────────────────────────────────────
+# Synthetic rollouts in the two on-disk layouts measured from real Codex
+# sessions (2025-08 .. 2026-10). See llm_memex/importers/codex.py.
+
+from llm_memex.importers import codex as codex_mod  # noqa: E402
+from llm_memex.importers.codex import detect as codex_detect  # noqa: E402
+from llm_memex.importers.codex import import_path as codex_import  # noqa: E402
+
+
+def _cx(rtype, payload, ordinal, ts="2026-07-01T10:00:00Z"):
+    return {"timestamp": ts, "type": rtype, "payload": payload, "ordinal": ordinal}
+
+
+def _cx_meta(thread="th-1", ordinal=0, source="cli", cli_version="0.150.0", **extra):
+    payload = {
+        "id": thread, "session_id": thread, "timestamp": "2026-07-01T10:00:00Z",
+        "cwd": "/work/proj", "originator": "codex-tui", "cli_version": cli_version,
+        "source": source, "git": {"branch": "main", "commit_hash": "abc",
+                                  "repository_url": "x"},
+    }
+    payload.update(extra)
+    return _cx("session_meta", payload, ordinal)
+
+
+def _cx_msg(role, text, ordinal, ts="2026-07-01T10:00:01Z"):
+    ptype = "output_text" if role == "assistant" else "input_text"
+    return _cx("response_item", {"type": "message", "role": role,
+                                 "content": [{"type": ptype, "text": text}]},
+               ordinal, ts)
+
+
+def _cx_write(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
+def _cx_v2_session(thread="th-1", source="cli"):
+    return [
+        _cx_meta(thread, source=source),
+        _cx("turn_context", {"model": "gpt-5.5", "cwd": "/work/proj",
+                             "approval_policy": "never"}, 1),
+        _cx("response_item", {"type": "message", "role": "developer",
+                              "content": [{"type": "input_text",
+                                           "text": "<permissions>...</permissions>"}]}, 2),
+        _cx("response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text",
+             "text": "<environment_context>\n  <cwd>/work/proj</cwd>\n</environment_context>"},
+        ]}, 3),
+        _cx_msg("user", "Fix the failing test please", 4),
+        _cx("event_msg", {"type": "item_completed", "item": {
+            "type": "UserMessage", "id": "x",
+            "content": [{"type": "text", "text": "Fix the failing test please"}]}}, 5),
+        _cx("response_item", {"type": "reasoning", "summary": [],
+                              "encrypted_content": "gAAA"}, 6),
+        _cx("response_item", {"type": "function_call", "name": "shell",
+                              "arguments": "{}", "call_id": "c1"}, 7),
+        _cx("response_item", {"type": "function_call_output", "call_id": "c1",
+                              "output": "ok"}, 8),
+        _cx_msg("assistant", "Fixed: the fixture was stale.", 9,
+                ts="2026-07-01T10:05:00Z"),
+        _cx("event_msg", {"type": "item_completed", "item": {
+            "type": "AgentMessage", "id": "y",
+            "content": [{"type": "text", "text": "Fixed: the fixture was stale."}]}}, 10),
+        _cx("brand_new_record_type", {"anything": 1}, 11),
+    ]
+
+
+class TestCodexDetect:
+    def test_detects_both_layouts(self, tmp_path):
+        v2 = _cx_write(tmp_path / "a.jsonl", _cx_v2_session())
+        v1 = _cx_write(tmp_path / "b.jsonl", [
+            {"id": "old-1", "timestamp": "2025-08-07T23:15:55Z", "instructions": None},
+        ])
+        assert codex_detect(str(v2)) and codex_detect(str(v1))
+        assert codex_detect(str(tmp_path))
+
+    def test_rejects_claude_code_and_other_jsonl(self, tmp_path):
+        cc = tmp_path / "cc.jsonl"
+        _write_jsonl(cc, [_cc_event("user", message={"role": "user", "content": "hi"})])
+        other = _cx_write(tmp_path / "o.jsonl", [{"type": "x", "id": "1"}])
+        assert not codex_detect(str(cc)) and not codex_detect(str(other))
+
+    def test_claude_code_detectors_do_not_claim_codex(self, tmp_path):
+        f = _cx_write(tmp_path / "a.jsonl", _cx_v2_session())
+        assert not claude_code_detect(str(f))
+        assert not claude_code_full_detect(str(f))
+
+
+class TestCodexImportLayout2:
+    def _conv(self, tmp_path, **kw):
+        f = _cx_write(tmp_path / "rollout-2026-07-01T10-00-00-th-1.jsonl",
+                      _cx_v2_session(**kw))
+        convs = codex_import(str(f))
+        assert len(convs) == 1
+        return convs[0]
+
+    def test_conversation_skeleton(self, tmp_path):
+        conv = self._conv(tmp_path)
+        msgs = list(conv.messages.values())
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        assert msgs[0].get_text() == "Fix the failing test please"
+        assert msgs[1].get_text() == "Fixed: the fixture was stale."
+        assert msgs[1].parent_id == msgs[0].id and msgs[0].parent_id is None
+        assert msgs[1].model == "gpt-5.5"
+        assert conv.id == "th-1" and conv.source == "codex" and conv.tags == ["codex"]
+        assert conv.model == "gpt-5.5"
+        assert conv.updated_at > conv.created_at
+
+    def test_message_ids_are_thread_segment_ordinal(self, tmp_path):
+        conv = self._conv(tmp_path)
+        assert list(conv.messages) == ["th-1:0:4", "th-1:0:9"]
+
+    def test_title_falls_back_to_first_human_message(self, tmp_path):
+        assert self._conv(tmp_path).title == "Fix the failing test please"
+
+    def test_session_context_and_provenance(self, tmp_path):
+        conv = self._conv(tmp_path)
+        assert conv.metadata["cwd"] == "/work/proj"
+        assert conv.metadata["git_branch"] == "main"
+        assert conv.metadata["client_version"] == "0.150.0"
+        assert conv.metadata["originator"] == "codex-tui"
+        assert conv.metadata["importer_mode"] == "conversation_only"
+        prov = conv.metadata["_provenance"]
+        assert prov["source_type"] == "codex"
+        assert prov["source_format"] == "codex-rollout/2"
+        assert prov["source_id"] == "th-1"
+
+    def test_image_input_becomes_media_block(self, tmp_path):
+        records = _cx_v2_session()
+        records.insert(5, _cx("response_item", {"type": "message", "role": "user",
+                                                "content": [
+            {"type": "input_text", "text": "<image name=[Image #1]>"},
+            {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+            {"type": "input_text", "text": "</image>"},
+            {"type": "input_text", "text": "what is this?"},
+        ]}, 50))
+        f = _cx_write(tmp_path / "r.jsonl", records)
+        user = [m for m in codex_import(str(f))[0].messages.values()
+                if m.role == "user"][1]
+        media = [b for b in user.content if b["type"] == "media"]
+        assert media == [{"type": "media", "media_type": "image/png",
+                          "data": "iVBORw0KGgo="}]
+        # The <image ...> / </image> wrapper parts are split across parts, so
+        # neither is a single element; they stay as text, in order.
+        texts = [b["text"] for b in user.content if b["type"] == "text"]
+        assert texts == ["<image name=[Image #1]>", "</image>", "what is this?"]
+
+    def test_lenient_json_and_truncated_last_line(self, tmp_path):
+        f = tmp_path / "r.jsonl"
+        lines = [json.dumps(r) for r in _cx_v2_session()]
+        # A raw control character inside a string (Codex writes these).
+        lines.insert(5, json.dumps(_cx_msg("user", "tabXHERE", 40)).replace("X", "\t"))
+        lines.append('{"timestamp": "2026-07-01T10:06:00Z", "type": "respon')
+        f.write_text("\n".join(lines) + "\n")
+        texts = [m.get_text() for m in codex_import(str(f))[0].messages.values()]
+        assert "tab\tHERE" in texts
+
+
+class TestCodexInjectedContext:
+    @pytest.mark.parametrize("text", [
+        "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
+        "<codex_internal_context>stuff</codex_internal_context>",
+        "  <heartbeat>tick</heartbeat>\n",
+        "<a-new-tag attr='1'>whatever</a-new-tag>",
+    ])
+    def test_single_element_is_injected(self, text):
+        assert codex_mod._is_injected_context(text)
+
+    @pytest.mark.parametrize("text", [
+        "Fix this <b>now</b>",
+        "<b>bold</b> start but more text",
+        "<a>one</a><b>two</b>",
+        "a < b and c > d",
+        "<>",
+    ])
+    def test_human_text_is_not_injected(self, text):
+        assert not codex_mod._is_injected_context(text)
+
+
+class TestCodexImportLayout1:
+    def test_pre_envelope_layout(self, tmp_path):
+        f = _cx_write(tmp_path / "rollout-2025-08-07T23-15-55-old.jsonl", [
+            {"id": "old-1", "timestamp": "2025-08-07T23:15:55Z", "instructions": None,
+             "git": {"branch": "dev", "commit_hash": "c", "repository_url": "u"}},
+            {"record_type": "state"},
+            {"type": "message", "id": None, "role": "user",
+             "content": [{"type": "input_text", "text": "hello codex"}]},
+            {"type": "reasoning", "id": "r", "summary": [], "encrypted_content": "x"},
+            {"type": "message", "id": None, "role": "assistant",
+             "content": [{"type": "output_text", "text": "hello human"}]},
+        ])
+        conv = codex_import(str(f))[0]
+        assert conv.id == "old-1"
+        assert [m.get_text() for m in conv.messages.values()] == ["hello codex", "hello human"]
+        assert conv.metadata["_provenance"]["source_format"] == "codex-rollout/1"
+        assert conv.metadata["git_branch"] == "dev"
+        assert "client_version" not in conv.metadata
+
+
+class TestCodexSplitThreads:
+    """A thread split across rollout files: the later file resumes from a fork
+    point, and the earlier file's records past it are a kept branch."""
+
+    def _split(self, tmp_path):
+        day = tmp_path / "sessions" / "2026" / "10" / "13"
+        first = [
+            _cx_meta("th-s", cli_version="0.159.0"),
+            _cx_msg("user", "q1", 1), _cx_msg("assistant", "a1", 2),
+            _cx_msg("user", "q2 (abandoned branch)", 3),
+            _cx_msg("assistant", "a2 (abandoned branch)", 4),
+        ]
+        # Second segment resumes at ordinal 3: its records reuse ordinals 3-4
+        # with different content (measured on real split threads).
+        second = [
+            _cx_meta("th-s", ordinal=3, cli_version="0.163.0"),
+            _cx_msg("user", "q2 (resumed)", 4), _cx_msg("assistant", "a2 (resumed)", 5),
+        ]
+        _cx_write(day / "rollout-2026-10-13T00-00-00-th-s.jsonl", first)
+        _cx_write(day.parent / "15" / "rollout-2026-10-15T00-00-00-th-s.jsonl", second)
+        return tmp_path / "sessions"
+
+    def test_one_conversation_with_both_branches(self, tmp_path):
+        convs = codex_import(str(self._split(tmp_path)))
+        assert len(convs) == 1
+        msgs = convs[0].messages
+        assert len(msgs) == 6
+        # Resumed branch forks from a1, the last message before ordinal 3.
+        assert msgs["th-s:1:4"].parent_id == "th-s:0:2"
+        assert msgs["th-s:0:3"].parent_id == "th-s:0:2"
+        assert msgs["th-s:1:5"].parent_id == "th-s:1:4"
+
+    def test_split_thread_metadata(self, tmp_path):
+        conv = codex_import(str(self._split(tmp_path)))[0]
+        assert conv.metadata["client_version"] == "0.163.0"  # newest segment
+        assert len(conv.metadata["source_files"]) == 2
+        assert conv.metadata["_provenance"]["source_file"].endswith(
+            "rollout-2026-10-13T00-00-00-th-s.jsonl")
+
+    def test_message_ids_stable_when_a_segment_is_added(self, tmp_path):
+        sessions = self._split(tmp_path)
+        before = set(codex_import(str(sessions))[0].messages)
+        _cx_write(sessions / "2026" / "10" / "17" / "rollout-2026-10-17T00-00-00-th-s.jsonl",
+                  [_cx_meta("th-s", ordinal=6), _cx_msg("user", "q3", 6)])
+        after = set(codex_import(str(sessions))[0].messages)
+        assert before < after
+
+
+class TestCodexTitlesAndSubagents:
+    def _home(self, tmp_path):
+        sessions = tmp_path / ".codex" / "sessions" / "2026" / "07" / "01"
+        _cx_write(sessions / "rollout-2026-07-01T10-00-00-parent.jsonl",
+                  _cx_v2_session("parent"))
+        child = _cx_v2_session("child", source={"subagent": {"thread_spawn": {
+            "parent_thread_id": "parent", "depth": 1, "agent_nickname": "Ada",
+            "agent_role": "explorer", "agent_path": "x"}}})
+        # Child file sorts before its parent by name; import must still order
+        # parents first (parent_conversation_id is a foreign key).
+        _cx_write(sessions / "rollout-2026-07-01T09-00-00-child.jsonl", child)
+        _cx_write(sessions / "rollout-2026-07-01T11-00-00-guard.jsonl",
+                  _cx_v2_session("guard", source={"subagent": {"other": "guardian"}}))
+        _cx_write(sessions / "rollout-2026-07-01T12-00-00-orphan.jsonl",
+                  _cx_v2_session("orphan", source={"subagent": {"thread_spawn": {
+                      "parent_thread_id": "pruned", "depth": 1}}}))
+        index = tmp_path / ".codex" / "session_index.jsonl"
+        index.write_text("\n".join(json.dumps(r) for r in [
+            {"id": "parent", "thread_name": "Old name", "updated_at": "x"},
+            {"id": "parent", "thread_name": "Fix flaky test", "updated_at": "y"},
+        ]) + "\n")
+        return tmp_path / ".codex" / "sessions"
+
+    def test_titles_from_session_index_latest_wins(self, tmp_path):
+        by_id = {c.id: c for c in codex_import(str(self._home(tmp_path)))}
+        assert by_id["parent"].title == "Fix flaky test"
+        assert by_id["child"].title == "Fix the failing test please"
+
+    def test_subagents_linked_and_ordered(self, tmp_path):
+        convs = codex_import(str(self._home(tmp_path)))
+        ids = [c.id for c in convs]
+        by_id = {c.id: c for c in convs}
+        assert ids.index("parent") < ids.index("child")
+        child = by_id["child"]
+        assert child.parent_conversation_id == "parent"
+        assert "codex-subagent" in child.tags
+        assert child.metadata["agent_nickname"] == "Ada"
+        assert child.metadata["subagent_kind"] == "thread_spawn"
+        assert by_id["guard"].metadata["subagent_kind"] == "guardian"
+        assert by_id["guard"].parent_conversation_id is None
+
+    def test_subagent_without_human_turn_titled_by_nickname(self, tmp_path):
+        records = [
+            _cx_meta("sub", source={"subagent": {"thread_spawn": {
+                "parent_thread_id": "p", "depth": 1, "agent_nickname": "Ada",
+                "agent_role": "explorer"}}}),
+            _cx("response_item", {"type": "agent_message", "author": "/root",
+                                  "recipient": "/root/ada", "content": []}, 1),
+            _cx_msg("assistant", "done", 2),
+        ]
+        f = _cx_write(tmp_path / "r.jsonl", records)
+        assert codex_import(str(f))[0].title == "Subagent Ada (explorer)"
+
+    def test_missing_parent_keeps_metadata_without_link(self, tmp_path):
+        orphan = {c.id: c for c in codex_import(str(self._home(tmp_path)))}["orphan"]
+        assert orphan.parent_conversation_id is None
+        assert orphan.metadata["parent_thread_id"] == "pruned"
