@@ -722,10 +722,17 @@ class Database:
                 "  summary=COALESCE(excluded.summary, conversations.summary),"
                 "  message_count=excluded.message_count,"
                 "  created_at=excluded.created_at, updated_at=excluded.updated_at,"
-                "  starred_at=excluded.starred_at, pinned_at=excluded.pinned_at,"
-                "  archived_at=excluded.archived_at,"
+                # Same rule for the user's flags: importers (other than an
+                # arkiv round-trip) never carry star/pin/archive state, so a
+                # NULL from the importer means "unknown", not "cleared". And
+                # a re-import can never clear a sensitive flag; only the user
+                # can, via update_conversations.
+                "  starred_at=COALESCE(excluded.starred_at, conversations.starred_at),"
+                "  pinned_at=COALESCE(excluded.pinned_at, conversations.pinned_at),"
+                "  archived_at=COALESCE(excluded.archived_at, conversations.archived_at),"
                 "  parent_conversation_id=excluded.parent_conversation_id,"
-                "  sensitive=excluded.sensitive, metadata=excluded.metadata",
+                "  sensitive=MAX(excluded.sensitive, conversations.sensitive),"
+                "  metadata=excluded.metadata",
                 (
                     conv.id, conv.title, conv.source, conv.model, conv.summary,
                     conv.message_count, _fmt_dt(conv.created_at),
@@ -736,10 +743,11 @@ class Database:
                 ),
             )
             # REPLACE used to CASCADE-clear child rows; replicate that explicitly
-            # for everything EXCEPT notes (which must stay attached). messages_fts
-            # is not FK-backed, so it was always cleaned by hand.
+            # for everything EXCEPT notes (which must stay attached) and tags
+            # (a user's tags would otherwise vanish on every re-import; the
+            # importer's own tags are re-added below with INSERT OR IGNORE).
+            # messages_fts is not FK-backed, so it was always cleaned by hand.
             c.execute("DELETE FROM messages WHERE conversation_id=?", (conv.id,))
-            c.execute("DELETE FROM tags WHERE conversation_id=?", (conv.id,))
             c.execute("DELETE FROM enrichments WHERE conversation_id=?", (conv.id,))
             c.execute("DELETE FROM provenance WHERE conversation_id=?", (conv.id,))
             c.execute(

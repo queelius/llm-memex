@@ -1127,6 +1127,53 @@ class TestReimportIntegrity:
         db.close()
         assert row is not None and row["conversation_id"] == "c1"
 
+    def test_reimport_keeps_user_flags(self, tmp_db_path):
+        """Importers carry no star/pin/archive/sensitive state; a re-import of an
+        active conversation must not clear what the user set."""
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        db.update_conversation("c1", starred=True, pinned=True, sensitive=True)
+        db.conn.execute(
+            "UPDATE conversations SET archived_at='2026-01-01T00:00:00' WHERE id='c1'"
+        )
+        db.conn.commit()
+        db.save_conversation(_make_conv())  # importer supplies none of them
+        row = db.conn.execute(
+            "SELECT starred_at, pinned_at, archived_at, sensitive "
+            "FROM conversations WHERE id='c1'"
+        ).fetchone()
+        db.close()
+        assert row["starred_at"] is not None
+        assert row["pinned_at"] is not None
+        assert row["archived_at"] == "2026-01-01T00:00:00"
+        assert row["sensitive"] == 1
+
+    def test_reimport_flags_supplied_by_importer_still_apply(self, tmp_db_path):
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        conv = _make_conv()
+        conv.starred_at = datetime(2026, 2, 3)
+        db.save_conversation(conv)
+        row = db.conn.execute(
+            "SELECT starred_at FROM conversations WHERE id='c1'"
+        ).fetchone()
+        db.close()
+        assert row["starred_at"].startswith("2026-02-03")
+
+    def test_reimport_keeps_user_tags(self, tmp_db_path):
+        db = Database(tmp_db_path)
+        db.save_conversation(_make_conv())
+        db.update_conversation("c1", add_tags=["keep-me"])
+        db.save_conversation(_make_conv())
+        tags = {
+            r["tag"]
+            for r in db.conn.execute(
+                "SELECT tag FROM tags WHERE conversation_id='c1'"
+            ).fetchall()
+        }
+        db.close()
+        assert tags == {"python", "testing", "keep-me"}
+
     def test_reopen_with_empty_schema_version(self, tmp_db_path):
         """A schema_version left empty (interrupted init) must not crash reopen (DB-2)."""
         from llm_memex.db import SCHEMA_VERSION
