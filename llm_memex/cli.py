@@ -95,7 +95,8 @@ def main():
                      help="Exclude notes from exported output")
     exp.add_argument("--include-archived", action="store_true",
                      help="Include soft-deleted (archived) conversations in the "
-                          "export (HTML export excludes them by default)")
+                          "export (every format, HTML and longecho included, "
+                          "excludes them by default)")
     exp.add_argument("--owner", default=None, metavar="NAME",
                      help="Name shown in a longecho archive's README "
                           "(other formats ignore it)")
@@ -149,9 +150,14 @@ def main():
 def _get_version():
     # Installed metadata, not ``llm_memex.__version__``: robust when a test
     # package directory shadows the real package (workspace convention C10).
-    from importlib.metadata import version
+    # An uninstalled checkout has no metadata; every command builds the parser
+    # (and reads this), so fall back rather than fail (as _longecho_docs does).
+    from importlib.metadata import PackageNotFoundError, version
 
-    return version("llm-memex")
+    try:
+        return version("llm-memex")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _list_formats(formats, label):

@@ -1334,8 +1334,9 @@ def _html_structure() -> str:
 
 _JS_VIEWER_HELPERS = r"""
 var TOO_LARGE_NOTICE = "This archive is too large for the browser viewer. " +
-  "Read it from the text/ folder (Markdown) or the data/ folder (arkiv JSONL) " +
-  "next to this site/ folder, or open a .db file here.";
+  "Read it from the text/ folder (Markdown) or the data/ folder " +
+  "(conversations.db, a SQLite database, and the arkiv JSONL) next to this " +
+  "site/ folder, or open a .db file here.";
 
 /**
  * Decode a base64 string to bytes.
@@ -1423,13 +1424,14 @@ function loadDbChunks() {
 }
 
 /**
- * Open the file picker with a message above its controls.
+ * Open the file picker with a message above its controls. The message is
+ * shown there only; the loading line behind the picker is cleared.
  * @param {Object} SQL - Initialized sql.js module
  * @param {string} message
  */
 function showPickerNotice(SQL, message) {
   showFilePicker(SQL);
-  document.getElementById("loading").textContent = message;
+  document.getElementById("loading").textContent = "";
   var inner = document.getElementById("drop-zone-inner");
   var note = document.getElementById("drop-zone-notice");
   if (!note) {

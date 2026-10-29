@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import gzip
+import os
 import re
 import shutil
 import sqlite3
@@ -19,6 +20,7 @@ ARCHIVED_ID = "archived-conv-id-xyz"
 ARCHIVED_TEXT = "ARCHIVED-ONLY-TEXT-QQQ"
 CONV_NOTE = "CONVERSATION-NOTE-ZZZ"
 MSG_NOTE = "MESSAGE-NOTE-ZZZ"
+REDACTED_TEXT = "REDACTED-SECRET-UNDO-QQQ"
 
 _ROOT_FILES = ("README.md", "SHA256SUMS")
 _CHUNK_RE = re.compile(r'llmMemexDbChunk\((\d+),"([^"]*)"\);')
@@ -59,6 +61,11 @@ def source(tmp_path):
             [_msg("a1", "user", ARCHIVED_TEXT)], archived=True))
         db.add_note(conversation_id="branchy", text=CONV_NOTE)
         db.add_note(conversation_id="branchy", message_id="m2", text=MSG_NOTE)
+        # What the redact script keeps so a redaction can be undone: the
+        # secret itself, which must never travel.
+        db.save_enrichment("branchy", "original_content",
+                           f'{{"message_id": "m2", "content": "{REDACTED_TEXT}"}}',
+                           "redact")
     return directory / "conversations.db"
 
 
@@ -165,7 +172,7 @@ def test_readme_stamped_and_site_uses_data_assets(source, tmp_path):
 def test_privacy_every_part(source, tmp_path, include_notes):
     out = tmp_path / "out"
     _export(source, out, include_notes=include_notes)
-    leaks = [ARCHIVED_ID.encode(), ARCHIVED_TEXT.encode()]
+    leaks = [ARCHIVED_ID.encode(), ARCHIVED_TEXT.encode(), REDACTED_TEXT.encode()]
     if not include_notes:
         leaks += [CONV_NOTE.encode(), MSG_NOTE.encode()]
     parts = {
@@ -341,6 +348,31 @@ def test_refuses_foreign_content_before_deleting_anything(source, tmp_path, name
     assert len(list((out / "text").rglob("*.md"))) == 3
 
 
+def test_damaged_listing_is_refused_before_deleting_anything(source, tmp_path):
+    """A SHA256SUMS that no longer lists data/arkiv: refused up front, not
+    after the rest of the export was cleared."""
+    out = tmp_path / "out"
+    _export(source, out)
+    (out / "SHA256SUMS").write_text("")
+    before = _tree(out)
+    with pytest.raises(ValueError, match="was not written"):
+        _export(source, out)
+    assert _tree(out) == before
+
+
+def test_listed_name_that_is_no_longer_a_regular_file_is_refused_up_front(source, tmp_path):
+    """It could not be deleted, so data/assets would survive the clearing."""
+    out = tmp_path / "out"
+    _export(source, out)
+    pic = out / "data" / "assets" / "pic.png"
+    pic.unlink()
+    os.mkfifo(pic)
+    before = _tree(out)
+    with pytest.raises(ValueError, match="not a regular file"):
+        _export(source, out)
+    assert _tree(out) == before
+
+
 def test_refuses_foreign_empty_directory_where_it_would_write(source, tmp_path):
     out = tmp_path / "out"
     _export(source, out)
@@ -386,28 +418,186 @@ def test_refuses_nested_symlink_and_touches_nothing_outside(source, tmp_path, ki
     _export(source, out)
     outside, rel = _plant(out, tmp_path, kind)
     before = {p.relative_to(outside): p.read_bytes() for p in _all_files(outside)}
+    sums = (out / "SHA256SUMS").read_bytes()
     with pytest.raises(ValueError, match=re.escape(f"{out / rel} is a symbolic link")):
         _export(source, out)
     assert {p.relative_to(outside): p.read_bytes() for p in _all_files(outside)} == before
     assert (out / rel).is_symlink()
+    # refused before anything was deleted: the previous export is still whole
+    assert (out / "SHA256SUMS").read_bytes() == sums
+    assert "generator: llm-memex longecho" in (out / "README.md").read_text()
 
 
-# ------------------------------------------------------- interrupted exports
+# ------------------------------------------------- refusals and failed runs
 
-def test_interrupted_export_is_reported_as_interrupted(source, tmp_path, monkeypatch):
+def _tree(root):
+    """Every entry below *root*: file bytes, symlink targets, and directories."""
+    tree = {}
+    for path in sorted(Path(root).rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            tree[rel] = ("link", str(path.readlink()))
+        elif path.is_dir():
+            tree[rel] = ("dir",)
+        elif path.is_file():
+            tree[rel] = path.read_bytes()
+        else:
+            tree[rel] = ("special",)
+    return tree
+
+
+def _hand_added(out):
+    (out / "my-letter.md").write_text("hand-added")
+    (out / "text" / "mine.md").write_text("in text")
+    (out / "data" / "extra.txt").write_text("in data")
+
+
+def _assert_hand_added_kept(out):
+    assert (out / "my-letter.md").read_text() == "hand-added"
+    assert (out / "text" / "mine.md").read_text() == "in text"
+    assert (out / "data" / "extra.txt").read_text() == "in data"
+
+
+def _assert_clean_export(out):
+    """Every file is either listed in SHA256SUMS or one of the hand-added ones."""
+    listed = set(_sums_listing(out))
+    present = {p.relative_to(out).as_posix() for p in _all_files(out)}
+    assert present - listed == {"SHA256SUMS", "my-letter.md", "text/mine.md",
+                                "data/extra.txt"}
+    assert _sha256_ok(out).returncode == 0
+
+
+def test_symlink_refusal_keeps_previous_export_and_next_run_replaces_it(source, tmp_path):
+    """Reviewer probe 1: a refusal used to delete the export first, after which
+    the folder was refused for good as not written by llm-memex."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+    before = _tree(out)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (out / "text" / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic link"):
+        _export(source, out)
+    (out / "text" / "link").unlink()
+    assert _tree(out) == before
+    assert _sha256_ok(out).returncode == 0
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
+
+
+def test_snapshot_failure_keeps_previous_export(source, tmp_path, monkeypatch):
+    """Reviewer probe 2: the snapshot (the step a full disk breaks) runs before
+    the destination is touched."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+    before = _tree(out)
+
+    def disk_full(*args, **kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(longecho, "take_snapshot", disk_full)
+    with pytest.raises(sqlite3.OperationalError, match="disk is full"):
+        _export(source, out)
+    assert _tree(out) == before
+    assert _sha256_ok(out).returncode == 0
+    monkeypatch.undo()
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
+
+
+# Steps that fail after the destination was cleared: before data/assets is
+# written (data/arkiv already is), inside site/, and at the very end.
+_LATE_STEPS = ["copy_retained_assets", "write_wasm_script", "render_root_readme"]
+
+
+@pytest.mark.parametrize("error", [OSError(28, "No space left on device"),
+                                   KeyboardInterrupt()], ids=["oserror", "interrupt"])
+@pytest.mark.parametrize("step", _LATE_STEPS)
+def test_failed_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch, step, error):
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+
+    def boom(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(longecho, step, boom)
+    with pytest.raises(type(error)):
+        _export(source, out)
+    readme = (out / "README.md").read_text()
+    assert "generator: llm-memex longecho" in readme
+    assert "did not finish" in readme and "again" in readme
+    # what the failed run left is listed, so the next run can remove it
+    assert _sha256_ok(out).returncode == 0
+    assert not {"my-letter.md", "text/mine.md", "data/extra.txt"} & set(_sums_listing(out))
+    _assert_hand_added_kept(out)
+
+    monkeypatch.undo()
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
+    assert "did not finish" not in (out / "README.md").read_text()
+
+
+def test_failed_first_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(longecho, "write_wasm_script", boom)
+    with pytest.raises(OSError):
+        _export(source, out)
+    monkeypatch.undo()
+    assert _export(source, out) == 2
+    assert _sha256_ok(out).returncode == 0
+    listed = set(_sums_listing(out))
+    assert {p.relative_to(out).as_posix() for p in _all_files(out)} - listed == {"SHA256SUMS"}
+
+
+def test_killed_export_is_reported_as_interrupted(source, tmp_path, monkeypatch):
+    """A run that dies without recording what it wrote (here: the recovery
+    write fails too, as after a hard kill) is refused with advice that keeps
+    hand-added files; the original error is the one raised."""
     out = tmp_path / "out"
 
     def boom(*args, **kwargs):
         raise RuntimeError("disk full")
 
+    def sums_fail(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
     monkeypatch.setattr(longecho, "copy_retained_assets", boom)
+    monkeypatch.setattr(longecho, "write_sha256sums", sums_fail)
     with pytest.raises(RuntimeError, match="disk full"):
         _export(source, out)
     assert "generator: llm-memex longecho" in (out / "README.md").read_text()
     assert not (out / "SHA256SUMS").exists()
     monkeypatch.undo()
-    with pytest.raises(ValueError, match="interrupted"):
+    with pytest.raises(ValueError, match="interrupted") as err:
         _export(source, out)
+    assert "Move out any files you added yourself" in str(err.value)
+
+
+def test_mixed_naive_and_aware_created_at(tmp_path):
+    """Reviewer probe 3: one row with an offset used to crash text/index.md."""
+    directory = tmp_path / "src"
+    with Database(str(directory)) as db:
+        for i in range(2):
+            db.save_conversation(_conv(f"c{i}", f"T{i}", "openai", 14 + i,
+                                       [_msg("m", "user", "x")]))
+    with contextlib.closing(sqlite3.connect(directory / "conversations.db")) as conn:
+        conn.execute("UPDATE conversations SET created_at='2025-06-14T08:00:00+00:00' "
+                     "WHERE id='c0'")
+        conn.commit()
+    out = tmp_path / "out"
+    assert _export(directory / "conversations.db", out) == 2
+    index = (out / "text" / "index.md").read_text()
+    assert index.index("[T1]") < index.index("[T0]")  # newest first
 
 
 # -------------------------------------------------------------- live source

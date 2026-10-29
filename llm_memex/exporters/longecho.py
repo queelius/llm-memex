@@ -12,10 +12,11 @@ import contextlib
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, List, Tuple
+from typing import Any, Iterator, List, Set
 
 from llm_memex.db import Database
 from llm_memex.exporters import arkiv_export
@@ -23,8 +24,8 @@ from llm_memex.exporters._longecho_docs import (
     README_NAME,
     SUMS_NAME,
     ArchiveSummary,
-    listed_paths,
-    prepare_destination,
+    clear_destination,
+    inspect_destination,
     render_placeholder_readme,
     render_root_readme,
     render_site_readme,
@@ -32,10 +33,7 @@ from llm_memex.exporters._longecho_docs import (
     write_sha256sums,
 )
 from llm_memex.exporters._longecho_site import (
-    DB_CHUNK_DIR,
-    WASM_SCRIPT_NAME,
     copy_sql_js,
-    db_chunk_name,
     write_db_chunks,
     write_wasm_script,
 )
@@ -104,74 +102,139 @@ def export(conversations: Any, path: str, **kwargs) -> int:
 
     out = Path(path)
     check_destination(db_path, out)
-    _refuse_foreign_content(out)  # decided before anything is deleted
-    prepare_destination(out)
+    # Every refusal is decided here, before anything is deleted, so a refused
+    # run leaves the previous export exactly as it was.
+    listed = inspect_destination(out)
+    _refuse_foreign_content(out, listed)
     _refuse_symlinks(out)
-    _refuse_leftovers(out)
-    # Stamped stand-in, so an interruption from here on leaves a folder the
-    # next run reports as interrupted rather than refuses as foreign.
-    (out / README_NAME).write_text(render_placeholder_readme(), encoding="utf-8")
-    written: List[PurePosixPath] = []  # every file this run creates, for SHA256SUMS
 
-    with tempfile.TemporaryDirectory(prefix="llm-memex-longecho-") as tmp:
-        tmp_dir = Path(tmp)
-        snapshot = tmp_dir / _SNAPSHOT_NAME
-        take_snapshot(
-            db_path, snapshot, include_notes=include_notes, include_archived=include_archived
-        )
+    run = _Run(out)
+    try:
+        # The temporary directory is removed before the handler below runs,
+        # which frees its space when a full disk was the failure.
+        with tempfile.TemporaryDirectory(prefix="llm-memex-longecho-") as tmp:
+            tmp_dir = Path(tmp)
+            snapshot = tmp_dir / _SNAPSHOT_NAME
+            # First, while the destination is untouched: a full disk (the
+            # likeliest failure, the snapshot being the biggest write) then
+            # leaves the previous export intact.
+            take_snapshot(
+                db_path, snapshot, include_notes=include_notes,
+                include_archived=include_archived,
+            )
+            clear_destination(out, listed)
+            run.cleared = True
+            # Stamped stand-in until the real README replaces it.
+            run.will_write(README_NAME).write_text(
+                render_placeholder_readme(), encoding="utf-8"
+            )
+            _refuse_leftovers(out)
+            run.blind_dirs_ours = True
 
-        entries: List[IndexEntry] = []
-        with Database(str(tmp_dir), readonly=True) as snap_db:
-            schema_ddl = snap_db.get_schema()
-            ids = [
-                row["id"]
-                for row in snap_db.conn.execute(
-                    "SELECT id FROM conversations ORDER BY created_at, id"
+            entries: List[IndexEntry] = []
+            with Database(str(tmp_dir), readonly=True) as snap_db:
+                schema_ddl = snap_db.get_schema()
+                ids = [
+                    row["id"]
+                    for row in snap_db.conn.execute(
+                        "SELECT id FROM conversations ORDER BY created_at, id"
+                    )
+                ]
+                (out / "data").mkdir(exist_ok=True)
+                count = arkiv_export.write_directory(
+                    _text_writing_stream(snap_db, ids, run, entries, include_notes),
+                    out / "data" / "arkiv",
+                    include_notes=include_notes,
+                    db=snap_db if include_notes else None,
                 )
-            ]
-            (out / "data").mkdir(exist_ok=True)
-            count = arkiv_export.write_directory(
-                _text_writing_stream(
-                    snap_db, ids, out / "text", entries, written, include_notes
-                ),
-                out / "data" / "arkiv",
-                include_notes=include_notes,
-                db=snap_db if include_notes else None,
+
+            # Opening the snapshot through Database switched it to WAL.
+            with contextlib.closing(sqlite3.connect(str(snapshot))) as conn:
+                conn.execute("PRAGMA journal_mode=DELETE")
+            shutil.copyfile(snapshot, run.will_write("data", _SNAPSHOT_NAME))
+            copy_retained_assets(snapshot, db_path.parent / "assets", out / "data" / "assets")
+
+            (out / "text").mkdir(exist_ok=True)
+            run.will_write("text", "index.md").write_text(
+                render_index(entries), encoding="utf-8"
             )
 
-        # Opening the snapshot through Database switched it to WAL.
-        with contextlib.closing(sqlite3.connect(str(snapshot))) as conn:
-            conn.execute("PRAGMA journal_mode=DELETE")
-        shutil.copyfile(snapshot, out / "data" / _SNAPSHOT_NAME)
-        written.append(PurePosixPath("data", _SNAPSHOT_NAME))
-        copy_retained_assets(snapshot, db_path.parent / "assets", out / "data" / "assets")
-        # data/arkiv and data/assets were absent before this run (checked above),
-        # so everything in them is ours.
-        written += _files_under(out, "data/arkiv") + _files_under(out, "data/assets")
+            chunks = _write_site(
+                run, snapshot, tmp_dir, schema_ddl,
+                site_max_db_bytes=site_max_db_bytes, db_chunk_bytes=db_chunk_bytes,
+            )
+            facts = summarize(snapshot)
 
-        (out / "text").mkdir(exist_ok=True)
-        (out / "text" / "index.md").write_text(render_index(entries), encoding="utf-8")
-        written.append(PurePosixPath("text", "index.md"))
-
-        chunks, site_files = _write_site(
-            out / "site", snapshot, tmp_dir, schema_ddl,
-            site_max_db_bytes=site_max_db_bytes, db_chunk_bytes=db_chunk_bytes,
+        summary = ArchiveSummary(
+            owner=owner,
+            include_notes=include_notes,
+            include_archived=include_archived,
+            site_has_data=chunks > 0,
+            exported_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **facts,
         )
-        written += site_files
-        facts = summarize(snapshot)
-
-    summary = ArchiveSummary(
-        owner=owner,
-        include_notes=include_notes,
-        include_archived=include_archived,
-        site_has_data=chunks > 0,
-        exported_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        **facts,
-    )
-    (out / README_NAME).write_text(render_root_readme(summary), encoding="utf-8")
-    written.append(PurePosixPath(README_NAME))
-    write_sha256sums(out, written)  # last: it lists what this run wrote, and only that
+        run.will_write(README_NAME).write_text(
+            render_root_readme(summary), encoding="utf-8"
+        )
+        # Last: it lists what this run wrote, and only that.
+        write_sha256sums(out, run.finished_files())
+    except BaseException:
+        run.record_failure()
+        raise
     return count
+
+
+class _Run:
+    """What one export has written into the destination so far.
+
+    A path is recorded before its file is written, so a file a failure cut
+    short is still accounted for (``write_sha256sums`` skips paths that do not
+    exist). After the destination was cleared, a failed run lists what it
+    wrote in ``SHA256SUMS`` before the error propagates: the folder then holds
+    the stamped stand-in README plus a listing, and the next run replaces it
+    the way it replaces a finished export.
+    """
+
+    def __init__(self, out: Path) -> None:
+        self.out = out
+        self.written: List[PurePosixPath] = []
+        self.cleared = False  # the previous export's files are gone
+        # data/arkiv and data/assets were proved absent after clearing, so
+        # every file in them is this run's.
+        self.blind_dirs_ours = False
+
+    def will_write(self, *parts: str) -> Path:
+        """Record ``out/<parts>`` as written by this run; return its full path."""
+        rel = PurePosixPath(*parts)
+        self.written.append(rel)
+        return self.out.joinpath(*rel.parts)
+
+    def record(self, paths: List[Path]) -> None:
+        """Record files a helper already wrote below ``out``."""
+        self.written += [PurePosixPath(p.relative_to(self.out).as_posix()) for p in paths]
+
+    def finished_files(self) -> List[PurePosixPath]:
+        """Everything this run wrote, including the two blindly written trees."""
+        files = list(self.written)
+        if self.blind_dirs_ours:
+            for name in _WRITTEN_BLINDLY:
+                files += _files_under(self.out, name)
+        return files
+
+    def record_failure(self) -> None:
+        """List what this run wrote, so the next run can replace it.
+
+        Nothing to do before clearing: the previous export is still whole. If
+        writing the listing fails too (the disk is still full), the stamped
+        README without ``SHA256SUMS`` is reported as interrupted next time;
+        the original error is the one that propagates.
+        """
+        if not self.cleared:
+            return
+        try:
+            write_sha256sums(self.out, self.finished_files())
+        except Exception:
+            pass
 
 
 def _files_under(out: Path, rel: str) -> List[PurePosixPath]:
@@ -191,19 +254,16 @@ def _leftover_message(path: Path) -> str:
     )
 
 
-def _refuse_foreign_content(out: Path) -> None:
-    """Before anything is deleted: refuse if data/arkiv or data/assets hold what
-    the previous export's SHA256SUMS does not list.
+def _refuse_foreign_content(out: Path, listed: Set[PurePosixPath]) -> None:
+    """Before anything is deleted: refuse if data/arkiv or data/assets hold
+    anything but regular files the previous export's SHA256SUMS lists (*listed*,
+    from ``inspect_destination``) and the directories that hold them.
 
     A fresh export rewrites those two directories wholesale, so hand-added
-    content in them would be lost. When the folder is not a previous export
-    (no SHA256SUMS) ``prepare_destination`` decides, and refuses or finds
-    nothing there.
+    content in them would be lost; and once the listed files are deleted the
+    two directories must be gone, or ``_refuse_leftovers`` would stop the run
+    after the previous export was already cleared.
     """
-    sums = out / SUMS_NAME
-    if not sums.is_file():
-        return
-    listed = listed_paths(sums)
     listed_dirs = {parent for rel in listed for parent in rel.parents}
     for name in _WRITTEN_BLINDLY:
         top = out / name
@@ -215,8 +275,11 @@ def _refuse_foreign_content(out: Path) -> None:
                 rel = PurePosixPath(full.relative_to(out).as_posix())
                 if full.is_symlink():
                     raise ValueError(f"{full} is a symbolic link; refusing to write through it")
-                if rel not in (listed if entry in filenames else listed_dirs):
+                is_file = entry in filenames
+                if rel not in (listed if is_file else listed_dirs):
                     raise ValueError(_leftover_message(full))
+                if is_file and not stat.S_ISREG(full.lstat().st_mode):
+                    raise ValueError(f"{full} is not a regular file; refusing to delete it")
 
 
 def _refuse_symlinks(out: Path) -> None:
@@ -254,9 +317,8 @@ def _refuse_leftovers(out: Path) -> None:
 def _text_writing_stream(
     snap_db: Database,
     ids: List[str],
-    text_dir: Path,
+    run: _Run,
     entries: List[IndexEntry],
-    written: List[PurePosixPath],
     include_notes: bool,
 ) -> Iterator[Any]:
     """Yield each conversation of the snapshot, writing its text/ file on the way.
@@ -270,32 +332,34 @@ def _text_writing_stream(
             continue
         notes = snap_db.get_notes(conversation_id=conv.id) if include_notes else []
         rel = text_path(conv)
-        target = text_dir / rel
+        target = run.will_write("text", *rel.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_conversation(conv, notes), encoding="utf-8")
-        written.append(PurePosixPath("text") / rel)
         entries.append(IndexEntry(rel, conv.title or "", conv.created_at, conv.source))
         yield conv
 
 
 def _write_site(
-    site_dir: Path,
+    run: _Run,
     snapshot: Path,
     tmp_dir: Path,
     schema_ddl: str,
     *,
     site_max_db_bytes: int,
     db_chunk_bytes: int,
-) -> Tuple[int, List[PurePosixPath]]:
-    """Write the viewer; return the number of database chunks (0 = none) and
-    the files written, relative to the export root."""
+) -> int:
+    """Write the viewer into ``site/``, recording every file in *run*; return
+    the number of database chunks (0 = left out, too large)."""
+    site_dir = run.out / "site"
     site_dir.mkdir(exist_ok=True)
     chunks = 0
     if snapshot.stat().st_size <= site_max_db_bytes:
         db_gz = tmp_dir / f"{_SNAPSHOT_NAME}.gz"
         gzip_file(snapshot, db_gz, keep_source=True)
-        chunks = write_db_chunks(db_gz, site_dir, db_chunk_bytes)
-    (site_dir / "index.html").write_text(
+        chunk_files = write_db_chunks(db_gz, site_dir, db_chunk_bytes)
+        run.record(chunk_files)
+        chunks = len(chunk_files)
+    run.will_write("site", "index.html").write_text(
         get_template(
             schema_ddl,
             media_base="../data/assets/",
@@ -304,9 +368,7 @@ def _write_site(
         ),
         encoding="utf-8",
     )
-    copy_sql_js(site_dir)
-    write_wasm_script(site_dir)
-    (site_dir / README_NAME).write_text(render_site_readme(), encoding="utf-8")
-    names = ["index.html", "sql-wasm.js", WASM_SCRIPT_NAME, README_NAME]
-    names += [f"{DB_CHUNK_DIR}/{db_chunk_name(i)}" for i in range(chunks)]
-    return chunks, [PurePosixPath("site", name) for name in names]
+    run.record(copy_sql_js(site_dir))
+    run.record(write_wasm_script(site_dir))
+    run.will_write("site", README_NAME).write_text(render_site_readme(), encoding="utf-8")
+    return chunks

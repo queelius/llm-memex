@@ -15,6 +15,8 @@ from llm_memex.exporters._longecho_docs import (
     GENERATOR_PREFIX,
     README_QUERIES,
     ArchiveSummary,
+    clear_destination,
+    inspect_destination,
     listed_paths,
     prepare_destination,
     render_placeholder_readme,
@@ -194,6 +196,20 @@ def test_readme_queries_run(tmp_path):
     assert "LIKE '%sqlite%'" in README_QUERIES[1][1]
 
 
+def test_readme_word_query_prints_a_bounded_excerpt(tmp_path):
+    """A message's content can be megabytes (agent transcripts): the README
+    query shows its first 300 characters, not the whole JSON."""
+    db_path = _seed_db(tmp_path)
+    huge = "sqlite " + "x" * 10_000
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE messages SET content = ?", (huge,))
+    sql = README_QUERIES[1][1]
+    assert "substr(m.content, 1, 300)" in sql
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        rows = conn.execute(sql).fetchall()
+    assert rows and all(len(row[2]) == 300 for row in rows)
+
+
 def test_site_readme():
     meta, body = _split(render_site_readme())
     assert meta["name"] == "llm-memex viewer"
@@ -265,8 +281,28 @@ def test_prepare_refuses_interrupted(tmp_path):
         prepare_destination(out)
     assert str(out) in str(err.value)
     assert "interrupted" in str(err.value)
-    assert "emove the folder" in str(err.value)
+    assert "Move out any files you added yourself, then remove the folder" in str(err.value)
     assert (out / "data" / "x.txt").exists()
+
+
+def test_inspect_decides_without_touching_and_clear_deletes_the_listing(tmp_path):
+    out = tmp_path / "out"
+    _stamped_export(out, {"text/2025/old.md": "old", "data/assets/a.png": "png"})
+    (out / "mine.txt").write_text("hand added")
+    before = sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))
+    listed = inspect_destination(out)
+    assert listed == {PurePosixPath("README.md"), PurePosixPath("text/2025/old.md"),
+                      PurePosixPath("data/assets/a.png")}
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == before
+    clear_destination(out, listed)
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["mine.txt"]
+
+
+def test_inspect_accepts_missing_and_empty_without_creating(tmp_path):
+    assert inspect_destination(tmp_path / "missing") == set()
+    assert not (tmp_path / "missing").exists()
+    clear_destination(tmp_path / "missing" / "nested", set())
+    assert (tmp_path / "missing" / "nested").is_dir()
 
 
 def test_prepare_deletes_listed_keeps_unlisted(tmp_path):
@@ -571,5 +607,6 @@ def test_placeholder_readme_is_stamped_and_recognised_as_interrupted(tmp_path):
     front, body = _split(render_placeholder_readme())
     assert front["generator"].startswith(GENERATOR_PREFIX)
     assert "in progress" in body
+    assert "did not finish" in body and "run the export again" in body.lower()
     with pytest.raises(ValueError, match="interrupted"):
         prepare_destination(out)

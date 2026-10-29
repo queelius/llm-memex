@@ -18,6 +18,29 @@ class TestCLIVersion:
         assert result.returncode == 0
         assert pkg_version in result.stdout
 
+    def test_version_without_installed_metadata(self, monkeypatch):
+        """An uninstalled checkout has no package metadata; every command
+        builds the parser (and so reads the version), so it must not raise."""
+        import importlib.metadata
+
+        from llm_memex.cli import _get_version
+
+        def missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", missing)
+        assert _get_version() == "unknown"
+
+    def test_include_archived_help_names_longecho(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", "--help"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        help_text = " ".join(result.stdout.split())
+        assert "every format, HTML and longecho included, excludes them by default" \
+            in help_text
+
 
 class TestCLIImport:
     def test_import_openai(self, tmp_path):

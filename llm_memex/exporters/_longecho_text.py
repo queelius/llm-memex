@@ -10,7 +10,7 @@ import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -157,6 +157,15 @@ def _escape_link_text(text: str) -> str:
     return re.sub(r"([\\\[\]])", r"\\\1", _one_line(text))
 
 
+def _sort_time(when: datetime) -> datetime:
+    """A key that orders naive and aware times together: aware times become
+    naive UTC, naive ones are taken as UTC as they are. (The database stores
+    times without an offset; a row written with one by other tools still sorts.)"""
+    if when.tzinfo is None:
+        return when
+    return when.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def render_index(entries: Iterable[IndexEntry]) -> str:
     """``text/index.md``: one section per year, newest first."""
     by_year: Dict[int, List[IndexEntry]] = defaultdict(list)
@@ -165,7 +174,7 @@ def render_index(entries: Iterable[IndexEntry]) -> str:
     blocks = ["# Conversations"]
     for year in sorted(by_year, reverse=True):
         lines = [f"## {year:04d}", ""]
-        for e in sorted(by_year[year], key=lambda e: (e.created_at, str(e.path)), reverse=True):
+        for e in sorted(by_year[year], key=lambda e: (_sort_time(e.created_at), str(e.path)), reverse=True):
             line = (f"- {e.created_at.strftime('%Y-%m-%d')} "
                     f"[{_escape_link_text(e.title) or 'Untitled'}]({e.path.as_posix()})")
             if e.source:

@@ -36,7 +36,7 @@ README_QUERIES: List[Tuple[str, str]] = [
     ),
     (
         "Messages that mention a word (here: sqlite), with the title of their conversation:",
-        "SELECT c.title, m.role, m.content FROM messages m "
+        "SELECT c.title, m.role, substr(m.content, 1, 300) FROM messages m "
         "JOIN conversations c ON c.id = m.conversation_id "
         "WHERE m.content LIKE '%sqlite%' LIMIT 10;",
     ),
@@ -239,7 +239,7 @@ def _root_body(summary: ArchiveSummary) -> str:
         add("")
     add("   The tables are `conversations` (one row each) and `messages` "
         "(`conversation_id` points at the conversation). Message `content` is "
-        "JSON text.")
+        "JSON text; the query above shows its first 300 characters.")
     add("4. **Read the JSON Lines.** `data/arkiv/conversations.jsonl` has the same "
         "messages, one JSON object per line, in a format called arkiv. "
         "`data/arkiv/README.md` and `data/arkiv/schema.yaml` describe it. Any "
@@ -308,19 +308,21 @@ def render_site_readme() -> str:
 def render_placeholder_readme() -> str:
     """A stand-in root README, written while an export is under way.
 
-    It carries the ownership stamp, so an export that is interrupted before the
-    real README replaces it leaves a folder the next run recognises as ours
-    (and reports as interrupted) instead of one it refuses as foreign.
+    It carries the ownership stamp, so an export that stops before the real
+    README replaces it leaves a folder the next run recognises as ours instead
+    of one it refuses as foreign. A run that fails lists what it wrote in
+    ``SHA256SUMS`` on the way out, so running the export again replaces it.
     """
     meta = {
         "name": "llm-memex archive (export in progress)",
-        "description": "An export is in progress or was interrupted.",
+        "description": "An export is in progress, or it did not finish.",
         "generator": _generator(),
     }
     return (
         _frontmatter(meta)
-        + "\nAn llm-memex export is in progress in this folder, or was interrupted "
-        "before it finished. Remove the folder and export again.\n"
+        + "\nAn llm-memex export into this folder is in progress, or it did not "
+        "finish. Run the export again to replace what is here; files you added "
+        "yourself are kept.\n"
     )
 
 
@@ -404,7 +406,7 @@ def listed_paths(sums_file: Path) -> Set[PurePosixPath]:
     """The plain relative paths a ``SHA256SUMS`` file lists.
 
     Entries that are not plain relative paths (absolute, ``..``, empty) are
-    left out, exactly as :func:`prepare_destination` leaves them alone.
+    left out, exactly as :func:`clear_destination` leaves them alone.
     """
     text = Path(sums_file).read_bytes().decode("utf-8", "surrogateescape")
     return {rel for rel in map(_listed_relpath, _parse_sums(text)) if rel is not None}
@@ -535,27 +537,21 @@ def _remove_empty_directory(root_fd: int, rel: PurePosixPath) -> None:
         os.close(parent_fd)
 
 
-def prepare_destination(out_dir: Path) -> None:
-    """Make *out_dir* ready for a fresh export, or refuse.
+def inspect_destination(out_dir: Path) -> Set[PurePosixPath]:
+    """Decide whether *out_dir* may receive a fresh export; touch nothing.
 
-    A missing or empty folder is created/accepted. A non-empty one is replaced
-    only if it is a complete previous longecho export by this tool: its root
-    README is stamped ``generator: llm-memex longecho ...`` and ``SHA256SUMS``
-    exists. Exactly the files that ``SHA256SUMS`` lists are deleted (then the
-    directories that leaves empty); anything a person added stays.
-
-    Order matters for recovery: the root README, which holds the ownership
-    stamp, goes last (after ``SHA256SUMS``), so every interruption leaves a
-    folder this function either resumes or explains.
+    Returns the files a replacement must delete: empty for a missing or empty
+    folder, else the plain relative paths the previous export's ``SHA256SUMS``
+    lists. A non-empty folder is accepted only if it is a complete previous
+    longecho export by this tool: its root README is stamped
+    ``generator: llm-memex longecho ...`` and ``SHA256SUMS`` exists. Anything
+    else raises ``ValueError``, with nothing deleted or created.
     """
     out_dir = Path(out_dir)
     if out_dir.exists() and not out_dir.is_dir():
         raise ValueError(f"{out_dir} exists and is not a directory")
-    if not out_dir.exists():
-        out_dir.mkdir(parents=True)
-        return
-    if not any(out_dir.iterdir()):
-        return
+    if not out_dir.exists() or not any(out_dir.iterdir()):
+        return set()
 
     found = _readme_generator(out_dir / README_NAME)
     if found is None or not found.startswith(GENERATOR_PREFIX):
@@ -570,17 +566,35 @@ def prepare_destination(out_dir: Path) -> None:
         raise ValueError(
             f"{out_dir} looks like an interrupted previous export: its README.md "
             f"is stamped but {SUMS_NAME} is missing, so what to replace is "
-            "unknown. Remove the folder and export again."
+            "unknown. Move out any files you added yourself, then remove the "
+            "folder and export again."
         )
+    return listed_paths(sums)
 
-    listed = _parse_sums(sums.read_bytes().decode("utf-8", "surrogateescape"))
+
+def clear_destination(out_dir: Path, listed: Iterable[PurePosixPath]) -> None:
+    """Delete the files *listed* (from :func:`inspect_destination`) below *out_dir*.
+
+    Creates *out_dir* if it is missing. Deletes exactly the listed regular
+    files, then the directories that leaves empty; anything a person added
+    stays. Every deletion goes through directory handles (see
+    ``_delete_regular_file``), so a symlink cannot lead it out of the tree.
+
+    Order matters for recovery: the root README, which holds the ownership
+    stamp, goes last (after ``SHA256SUMS``), so an interruption here leaves a
+    folder :func:`inspect_destination` either accepts or explains.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plain = {
+        rel for rel in (_listed_relpath(PurePosixPath(p).as_posix()) for p in listed)
+        if rel is not None
+    }
+    last = (PurePosixPath(SUMS_NAME), PurePosixPath(README_NAME))
     root_fd = os.open(out_dir, _DIR_FLAGS)
     try:
         deleted_parents = set()
-        for name in listed:
-            rel = _listed_relpath(name)
-            if rel is None or rel in (PurePosixPath(SUMS_NAME), PurePosixPath(README_NAME)):
-                continue  # SHA256SUMS and README.md are removed last, below
+        for rel in sorted(plain - set(last)):
             if _delete_regular_file(root_fd, rel):
                 deleted_parents.update(p for p in rel.parents if p.parts)
 
@@ -588,8 +602,18 @@ def prepare_destination(out_dir: Path) -> None:
         for rel in sorted(deleted_parents, key=lambda p: len(p.parts), reverse=True):
             _remove_empty_directory(root_fd, rel)
 
+        # SHA256SUMS always goes (it described the files just deleted).
         _delete_regular_file(root_fd, PurePosixPath(SUMS_NAME))
-        if PurePosixPath(README_NAME) in map(_listed_relpath, listed):
+        if PurePosixPath(README_NAME) in plain:
             _delete_regular_file(root_fd, PurePosixPath(README_NAME))
     finally:
         os.close(root_fd)
+
+
+def prepare_destination(out_dir: Path) -> None:
+    """Make *out_dir* ready for a fresh export, or refuse: inspect, then clear.
+
+    The exporter calls the two steps itself, with its own checks and the
+    snapshot in between, so every refusal comes before anything is deleted.
+    """
+    clear_destination(out_dir, inspect_destination(out_dir))

@@ -120,9 +120,9 @@ def test_chunks_reassemble(tmp_path):
     db_gz.write_bytes(payload)
     site = tmp_path / "site"
 
-    count = write_db_chunks(db_gz, site, chunk_bytes=16384)
+    written = write_db_chunks(db_gz, site, chunk_bytes=16384)
 
-    assert count == 3
+    assert written == [site / "db" / f"{i:03d}.js" for i in range(3)]
     names = sorted(p.name for p in (site / "db").iterdir())
     assert names == ["000.js", "001.js", "002.js"]
     joined = b""
@@ -135,7 +135,7 @@ def test_chunks_reassemble(tmp_path):
 def test_chunk_sizes_slice_gzip_bytes(tmp_path):
     db_gz = tmp_path / "x.gz"
     db_gz.write_bytes(bytes(range(256)) * 10)  # 2560 bytes
-    assert write_db_chunks(db_gz, tmp_path / "site", chunk_bytes=1000) == 3
+    assert len(write_db_chunks(db_gz, tmp_path / "site", chunk_bytes=1000)) == 3
     sizes = [
         len(_js_string_arg((tmp_path / "site" / "db" / f"{i:03d}.js").read_text(),
                            f"llmMemexDbChunk({i},", ");\n"))
@@ -161,14 +161,14 @@ def test_empty_gzip_file_is_rejected(tmp_path):
 
 
 def test_wasm_script_decodes_to_vendored_wasm(tmp_path):
-    write_wasm_script(tmp_path)
+    assert write_wasm_script(tmp_path) == [tmp_path / "sql-wasm-binary.js"]
     text = (tmp_path / "sql-wasm-binary.js").read_text(encoding="ascii")
     decoded = _js_string_arg(text, "window.LLM_MEMEX_WASM_B64 = ", ";\n")
     assert decoded == (VENDORED / "sql-wasm.wasm").read_bytes()
 
 
 def test_copy_sql_js(tmp_path):
-    copy_sql_js(tmp_path / "site")
+    assert copy_sql_js(tmp_path / "site") == [tmp_path / "site" / "sql-wasm.js"]
     assert (tmp_path / "site" / "sql-wasm.js").read_bytes() == \
         (VENDORED / "sql-wasm.js").read_bytes()
 
@@ -304,7 +304,7 @@ def _build_site(tmp_path: Path, chunk_bytes: int = 30000):
     db_gz = tmp_path / "t.db.gz"
     db_gz.write_bytes(gzip.compress(db.read_bytes()))
     site = tmp_path / "site"
-    count = write_db_chunks(db_gz, site, chunk_bytes=chunk_bytes)
+    count = len(write_db_chunks(db_gz, site, chunk_bytes=chunk_bytes))
     assert count >= 3
     write_wasm_script(site)
     copy_sql_js(site)
@@ -318,6 +318,7 @@ OPEN_DB = """
     return {
       rows,
       notice: ctx.document.getElementById("drop-zone-notice").textContent,
+      loading: ctx.document.getElementById("loading").textContent,
       wasmFreed: ctx.LLM_MEMEX_WASM_B64 === null,
     };"""
 
@@ -326,7 +327,8 @@ OPEN_DB = """
 def test_js_chunks_open_db(tmp_path):
     site, count = _build_site(tmp_path)
     result = _run_viewer(tmp_path, OPEN_DB, site_dir=site, db_chunks=count)
-    assert result == {"rows": 2000, "notice": "", "wasmFreed": True}
+    assert result["rows"] == 2000 and result["wasmFreed"] is True
+    assert result["notice"] == ""
 
 
 @needs_node
@@ -335,6 +337,7 @@ def test_js_missing_chunk_is_named(tmp_path):
     result = _run_viewer(tmp_path, OPEN_DB, site_dir=site, db_chunks=count + 1)
     assert result["rows"] is None
     assert f"db/{count:03d}.js" in result["notice"]
+    assert f"db/{count:03d}.js" not in result["loading"]
 
 
 @needs_node
@@ -344,3 +347,7 @@ def test_js_too_large_archive_shows_notice(tmp_path):
     assert result["rows"] is None
     assert "too large" in result["notice"]
     assert "text/" in result["notice"] and "data/" in result["notice"]
+    assert "conversations.db" in result["notice"] and "SQLite" in result["notice"]
+    assert "arkiv JSONL" in result["notice"]
+    # shown once: in the picker, not repeated in the loading line behind it
+    assert "too large" not in result["loading"]

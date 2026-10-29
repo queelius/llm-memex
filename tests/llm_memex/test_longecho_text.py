@@ -190,3 +190,19 @@ def test_index_groups_by_year_newest_first():
 
 def test_index_empty():
     assert render_index([]).startswith("# Conversations")
+
+
+def test_index_sorts_naive_and_aware_times_together():
+    """Reviewer probe 3: a row stored with an offset sits beside naive ones."""
+    from datetime import timedelta, timezone
+
+    entries = [
+        IndexEntry(PurePosixPath("2025/a.md"), "naive noon", datetime(2025, 6, 14, 12), None),
+        # 08:00 at UTC-6 is 14:00 UTC: newer than the naive (UTC) noon
+        IndexEntry(PurePosixPath("2025/b.md"), "aware two pm",
+                   datetime(2025, 6, 14, 8, tzinfo=timezone(timedelta(hours=-6))), None),
+        IndexEntry(PurePosixPath("2025/c.md"), "aware ten am",
+                   datetime(2025, 6, 14, 10, tzinfo=timezone.utc), None),
+    ]
+    out = render_index(entries)
+    assert out.index("aware two pm") < out.index("naive noon") < out.index("aware ten am")
