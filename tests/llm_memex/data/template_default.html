@@ -1,0 +1,3487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
+<title>memex</title>
+<style>
+:root {
+  /* dark theme (walnut + amber) */
+  --bg: #1a1714;
+  --bg-surface: #221e1a;
+  --bg-overlay: #2b2620;
+  --bg-elevated: #322c25;
+  --text: #e8e1d3;
+  --text-muted: #938c7e;
+  --text-subtle: #6e685c;
+  --text-strong: #f7f1e4;
+  --text-accent: #d4a46a;
+  --border: #3a342c;
+  --border-strong: #4a4238;
+  --border-accent: #d4a46a;
+  --badge-bg: rgba(212, 164, 106, 0.14);
+  --badge-text: #e8c088;
+  --msg-user-bg: #221e1a;
+  --msg-assistant-bg: transparent;
+  --msg-assistant-border: #d4a46a;
+  --success: #7ca86b;
+  --warning: #d4a046;
+  --danger: #d4705e;
+  --selection: rgba(212, 164, 106, 0.18);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.35);
+  /* source palette — distinct hues for each provider */
+  --src-openai: #7ca86b;
+  --src-anthropic: #c78e51;
+  --src-claude-code: #a88dc8;
+  --src-gemini: #6ea3c7;
+  --src-other: #8a8578;
+  /* layout + typography */
+  --header-height: 56px;
+  --content-max-width: 780px;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino", "Georgia", serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, Menlo, monospace;
+  --font-size: 14px;
+  --font-size-sm: 12px;
+  --font-size-lg: 15px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 22px;
+  --font-size-3xl: 28px;
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --gap: 10px;
+  --gap-sm: 6px;
+  --gap-lg: 18px;
+  --gap-xl: 28px;
+}
+
+:root[data-theme="light"] {
+  /* light theme (cream + bronze) */
+  --bg: #faf7f0;
+  --bg-surface: #f2ede2;
+  --bg-overlay: #ffffff;
+  --bg-elevated: #ffffff;
+  --text: #2e2820;
+  --text-muted: #7a7162;
+  --text-subtle: #a39a8a;
+  --text-strong: #1a1610;
+  --text-accent: #8a5a2b;
+  --border: #e4ddce;
+  --border-strong: #cfc6b2;
+  --border-accent: #8a5a2b;
+  --badge-bg: #f3e6d0;
+  --badge-text: #6e4520;
+  --msg-user-bg: #f2ede2;
+  --msg-assistant-bg: transparent;
+  --msg-assistant-border: #8a5a2b;
+  --success: #4f7a3f;
+  --warning: #a07418;
+  --danger: #a54423;
+  --selection: rgba(138, 90, 43, 0.14);
+  --shadow-sm: 0 1px 2px rgba(60, 42, 20, 0.08);
+  --shadow-md: 0 4px 14px rgba(60, 42, 20, 0.10);
+  --src-openai: #4f7a3f;
+  --src-anthropic: #9a5820;
+  --src-claude-code: #6b4d8c;
+  --src-gemini: #326085;
+  --src-other: #7a7162;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size);
+  line-height: 1.5;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  background: var(--bg);
+}
+
+#top-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: saturate(1.1);
+}
+.top-bar-inner {
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 14px 22px 10px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+#top-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+#top-brand-name {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+#back-chevron {
+  color: var(--text-muted);
+  font-size: 15px;
+  transition: color 0.15s;
+}
+#top-brand:hover #back-chevron { color: var(--text-strong); }
+#mode-label {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-muted);
+}
+#mode-label::before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--text-subtle);
+}
+
+#top-search-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+#top-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.filters-row {
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 0 22px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.filters-row:empty { display: none; padding: 0; }
+
+#main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 28px 22px 64px;
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 20px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.section-header h3 {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-strong);
+  letter-spacing: -0.01em;
+}
+.section-header-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#home-recent {
+  margin-top: 28px;
+}
+
+#input-area {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+#search-box {
+  width: 100%;
+  padding: 10px 16px;
+  background: var(--bg-overlay);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font-sans);
+  font-size: 14.5px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+#search-box:focus {
+  border-color: var(--border-accent);
+  box-shadow: 0 0 0 3px var(--selection);
+}
+#search-box::placeholder { color: var(--text-subtle); }
+
+.icon-btn {
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  line-height: 1;
+}
+.icon-btn:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border);
+  color: var(--text-strong);
+}
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--selection);
+  border-color: var(--border-accent);
+}
+
+#conv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.conv-item {
+  padding: 12px 16px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  transition: background 0.1s, border-color 0.1s;
+}
+.conv-item:hover {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.conv-item-note-badge {
+  color: var(--text-accent);
+  font-size: 11px;
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.conv-item-title {
+  color: var(--text-strong);
+  font-size: 14.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+.conv-item-meta {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.source-openai { background: var(--src-openai); }
+.source-anthropic { background: var(--src-anthropic); }
+.source-claude_code { background: var(--src-claude-code); }
+.source-gemini { background: var(--src-gemini); }
+.source-other { background: var(--src-other); }
+
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.message {
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  border-radius: var(--radius);
+  position: relative;
+}
+
+.message.user {
+  background: var(--msg-user-bg);
+  border: 1px solid var(--border);
+}
+
+.message.assistant {
+  background: var(--msg-assistant-bg);
+  padding-left: 18px;
+  border-left: 2px solid var(--msg-assistant-border);
+  padding-top: 6px;
+  padding-bottom: 6px;
+  margin-left: 2px;
+}
+
+.message.system {
+  border-left: 2px solid var(--warning);
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.message-role {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  color: var(--text-subtle);
+}
+
+.message.user .message-role { color: var(--text-muted); }
+.message.assistant .message-role { color: var(--text-accent); }
+.message.system .message-role { color: var(--warning); }
+
+.message-content {
+  word-break: break-word;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+/* Message content rendering */
+.message-content pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+  white-space: pre;
+  font-family: var(--font-mono);
+}
+
+.message-content code {
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+}
+
+.message-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.message-content img {
+  max-width: 100%;
+  border-radius: var(--radius);
+  margin: 4px 0;
+}
+
+.message-content audio,
+.message-content video {
+  max-width: 100%;
+  margin: 4px 0;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4 {
+  color: var(--text-strong);
+  margin: 12px 0 4px 0;
+}
+
+.message-content ul {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+.message-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+
+.message-content a {
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.message-content a:hover {
+  text-decoration: underline;
+}
+
+.message-content p {
+  margin: 4px 0;
+}
+
+/* Message input area */
+#input-area {
+  padding: var(--gap) 12px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  gap: var(--gap);
+}
+
+#message-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  outline: none;
+  resize: none;
+}
+
+#message-input:focus {
+  border-color: var(--border-accent);
+}
+
+.filter-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+  user-select: none;
+}
+.filter-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.filter-chip.active {
+  background: var(--text-accent);
+  border-color: var(--text-accent);
+  color: var(--bg);
+}
+
+.conv-header {
+  margin-bottom: 28px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.conv-header h2 {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-2xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+  margin-bottom: 8px;
+  line-height: 1.3;
+}
+.conv-header-meta {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  margin-bottom: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+.conv-header-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.conv-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--badge-text);
+  background: var(--badge-bg);
+  border-radius: 10px;
+  letter-spacing: 0.01em;
+}
+
+.btn {
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  line-height: 1;
+}
+.btn:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--selection);
+  border-color: var(--border-accent);
+}
+
+#main-actions .btn {
+  padding: 6px 9px;
+  border-color: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+#main-actions .btn:hover {
+  border-color: var(--border);
+  color: var(--text-strong);
+}
+
+.btn-primary {
+  background: var(--text-accent);
+  color: var(--bg);
+  border-color: var(--text-accent);
+}
+.btn-primary:hover {
+  background: var(--text-accent);
+  color: var(--bg);
+  opacity: 0.88;
+}
+
+/* Settings overlay */
+#settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+
+#settings-overlay.visible {
+  display: flex;
+}
+
+#settings-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+#settings-panel h3 {
+  color: var(--text-strong);
+  margin-bottom: 12px;
+}
+
+.settings-field {
+  margin-bottom: 12px;
+}
+
+.settings-field label {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  margin-bottom: 4px;
+}
+
+.settings-field input,
+.settings-field textarea,
+.settings-field select {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  outline: none;
+}
+
+.settings-field input:focus,
+.settings-field textarea:focus,
+.settings-field select:focus {
+  border-color: var(--border-accent);
+}
+
+.settings-field textarea {
+  resize: vertical;
+}
+
+.settings-divider {
+  border-top: 1px solid var(--border);
+  margin: 18px 0 12px;
+}
+.settings-help {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 4px 0 10px;
+}
+.settings-help code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  background: var(--bg);
+  border-radius: 2px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: var(--gap);
+  margin-top: 16px;
+}
+
+/* File picker / drop zone */
+#drop-zone {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+}
+
+#drop-zone.visible {
+  display: flex;
+}
+
+#drop-zone-inner {
+  border: 2px dashed var(--border-accent);
+  border-radius: 8px;
+  padding: 48px 64px;
+  text-align: center;
+  color: var(--text-accent);
+  font-size: var(--font-size-lg);
+}
+
+#drop-zone-inner p {
+  margin-bottom: 12px;
+}
+
+#file-input {
+  display: none;
+}
+
+/* Loading state */
+#loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: var(--font-size-lg);
+}
+
+/* Utility classes */
+.hidden { display: none !important; }
+
+/* Welcome state */
+.welcome {
+  padding: 56px 0 40px;
+  text-align: center;
+}
+
+.welcome h2 {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-3xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+  margin-bottom: 10px;
+}
+
+.welcome > p {
+  font-size: var(--font-size-lg);
+  color: var(--text-muted);
+  max-width: 520px;
+  margin: 0 auto 36px;
+  line-height: 1.55;
+}
+
+.welcome-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin: 0 auto 36px;
+  max-width: 640px;
+}
+.welcome-stat {
+  padding: 18px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.welcome-stat:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.welcome-stat-value {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-2xl);
+  font-weight: 600;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.welcome-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 6px;
+}
+
+.welcome-source-breakdown {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 36px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.welcome-source-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Notes (marginalia) */
+.note {
+  border-left: 3px solid var(--text-accent);
+  background: var(--selection);
+  padding: 8px 12px;
+  margin: 8px 0;
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.note-text {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.note-meta {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.note-actions {
+  display: inline-block;
+  margin-left: 12px;
+  font-size: 11px;
+}
+
+.note-actions button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.note-actions button:hover {
+  color: var(--text-accent);
+}
+
+/* ── Librarian chat mode ────────────────────────────────────── */
+.chat-view {
+  display: flex;
+  flex-direction: column;
+}
+.chat-intro {
+  padding: 20px 0 24px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+.chat-intro-title {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-2xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+  margin-bottom: 8px;
+}
+.chat-intro-body {
+  color: var(--text-muted);
+  font-size: var(--font-size-lg);
+  line-height: 1.55;
+  max-width: 640px;
+}
+.chat-log {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Marginalia browse mode ─────────────────────────────────── */
+.marginalia-header {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  padding: 12px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.marginalia-filter {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size);
+  margin-bottom: 12px;
+}
+.marginalia-filter:focus {
+  outline: none;
+  border-color: var(--border-accent);
+}
+
+.marginalia-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.marginalia-card {
+  border-left: 3px solid var(--text-accent);
+  background: var(--bg-surface);
+  padding: 10px 14px;
+  border-radius: 0 4px 4px 0;
+}
+
+.marginalia-card-text {
+  white-space: pre-wrap;
+  color: var(--text);
+  font-size: var(--font-size);
+  margin-bottom: 8px;
+}
+
+.marginalia-card-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.marginalia-card-title {
+  color: var(--text-accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.marginalia-card-title:hover { text-decoration: underline; }
+
+.marginalia-card-scope,
+.marginalia-card-source,
+.marginalia-card-date {
+  color: var(--text-muted);
+}
+
+.marginalia-empty {
+  padding: 20px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+.media-missing {
+  display: inline-block;
+  padding: 4px 10px;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* ── Search results mode ────────────────────────────────────── */
+.search-results-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+.search-results-input:focus { outline: none; border-color: var(--border-accent); }
+
+.search-results-status {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  padding: 4px 0 12px;
+}
+
+.search-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.search-result-card {
+  background: var(--bg-surface);
+  padding: 10px 14px;
+  border-radius: 4px;
+  border-left: 3px solid var(--border);
+}
+.search-result-card:hover { border-left-color: var(--text-accent); }
+
+.search-result-title {
+  color: var(--text-accent);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 15px;
+  display: block;
+}
+.search-result-title:hover { text-decoration: underline; }
+
+.search-result-meta {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  margin: 3px 0 6px;
+}
+
+.search-result-snippet {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+  padding: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.search-result-snippet mark {
+  background: var(--selection);
+  color: var(--text-strong);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.add-note-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 2px 6px;
+  opacity: 0.5;
+}
+
+.add-note-btn:hover {
+  opacity: 1;
+  color: var(--text-accent);
+}
+
+.note-composer {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.note-composer textarea {
+  flex: 1;
+  min-height: 60px;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+.note-composer .btn {
+  align-self: flex-start;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="top-bar">
+    <div class="top-bar-inner">
+      <div id="top-brand" onclick="goHome()" title="back to memex home">
+        <span id="back-chevron" class="hidden">&#8592;</span>
+        <span id="top-brand-name">memex</span>
+        <span id="mode-label" class="hidden"></span>
+      </div>
+      <div id="top-search-wrap">
+        <input type="text" id="search-box" placeholder="search your archive…" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="top-actions">
+        <button class="btn icon-btn" id="chat-toggle" onclick="openChat()" title="chat with the librarian about your archive">&#128172;</button>
+        <button class="btn icon-btn" id="marginalia-toggle" onclick="openMarginalia()" title="browse all notes">&#9998;</button>
+        <button class="btn icon-btn" id="theme-toggle" onclick="toggleTheme()" title="toggle light/dark mode">&#9790;</button>
+        <button class="btn icon-btn" onclick="toggleSettings()" title="settings">&#9881;</button>
+      </div>
+    </div>
+    <div id="filters" class="filters-row"></div>
+  </header>
+
+  <main id="main">
+    <div id="messages">
+      <div id="loading">loading…</div>
+      <div id="welcome" class="welcome hidden">
+        <h2>Your memex</h2>
+        <p>A personal archive of conversations, thoughts, and the marginalia you added while revisiting them.</p>
+        <div class="welcome-stats" id="welcome-stats"></div>
+        <div class="welcome-source-breakdown" id="welcome-sources"></div>
+      </div>
+      <div id="home-recent" class="home-recent hidden">
+        <div class="section-header">
+          <h3 id="home-recent-heading">recent</h3>
+          <span id="home-recent-count" class="section-header-count"></span>
+        </div>
+        <div id="conv-list"></div>
+      </div>
+    </div>
+    <div id="input-area" class="hidden">
+      <textarea id="message-input" rows="1" placeholder="add a note…"></textarea>
+      <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">send</button>
+    </div>
+  </main>
+</div>
+
+<!-- Settings overlay -->
+<div id="settings-overlay">
+  <div id="settings-panel">
+    <h3>settings</h3>
+    <div class="settings-field">
+      <label for="setting-provider">Provider</label>
+      <select id="setting-provider">
+        <option value="anthropic">Anthropic (messages API)</option>
+        <option value="openai">OpenAI-compatible (chat/completions API)</option>
+      </select>
+    </div>
+    <div class="settings-field">
+      <label for="setting-endpoint">API endpoint</label>
+      <input type="text" id="setting-endpoint" placeholder="https://api.anthropic.com/v1/messages" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="settings-field">
+      <label for="setting-api-key">API key (optional if using proxy)</label>
+      <input type="password" id="setting-api-key" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    </div>
+    <div class="settings-field">
+      <label for="setting-model">Model</label>
+      <input type="text" id="setting-model" placeholder="claude-sonnet-4-6" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="settings-field">
+      <label for="setting-system-prompt">System prompt (optional)</label>
+      <textarea id="setting-system-prompt" rows="4" placeholder="You are a helpful assistant..."></textarea>
+    </div>
+    <div class="settings-divider"></div>
+    <div class="settings-field">
+      <label>Round-trip</label>
+      <p class="settings-help">Download your archive as arkiv JSONL (gzipped). Feed the file to <code>llm-memex import</code> to merge annotations and chat continuations back into your primary DB.</p>
+      <button class="btn" id="download-arkiv-btn" onclick="downloadArkiv()">download archive (.jsonl.gz)</button>
+      <button class="btn" onclick="downloadDb()" style="margin-left: 8px;">download raw .db</button>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-primary" onclick="saveSettings()">save</button>
+      <button class="btn" onclick="toggleSettings()">close</button>
+    </div>
+  </div>
+</div>
+
+<!-- File picker / drop zone -->
+<div id="drop-zone">
+  <div id="drop-zone-inner">
+    <p>drop a .db file here</p>
+    <p style="font-size: var(--font-size-sm); color: var(--text-muted);">or</p>
+    <button class="btn btn-primary" onclick="document.getElementById(&quot;file-input&quot;).click()">choose file</button>
+  </div>
+  <input type="file" id="file-input" accept=".db,.sqlite,.sqlite3,.gz">
+</div>
+
+<script src="sql-wasm.js"></script>
+<script>
+/* -- globals --------------------------------------------------------- */
+var db = null;
+var WASM_URL = "sql-wasm.wasm";
+
+/* -- query helpers --------------------------------------------------- */
+
+/**
+ * Run a SELECT query and return an array of plain objects.
+ * @param {string} sql - SQL query string
+ * @param {Object|Array} [params] - Bind parameters
+ * @returns {Array<Object>} Array of row objects
+ */
+function query(sql, params) {
+  if (!db) throw new Error("No database loaded");
+  var stmt = db.prepare(sql);
+  try {
+    if (params) stmt.bind(params);
+    var results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    return results;
+  } finally {
+    stmt.free();
+  }
+}
+
+/**
+ * Run a write statement (INSERT, UPDATE, DELETE).
+ * @param {string} sql - SQL statement
+ * @param {Object|Array} [params] - Bind parameters
+ */
+function exec(sql, params) {
+  if (!db) throw new Error("No database loaded");
+  if (params) {
+    db.run(sql, params);
+  } else {
+    db.run(sql);
+  }
+}
+
+/* -- DB loading cascade ---------------------------------------------- */
+
+/**
+ * Initialize the application: load sql.js and attempt to open a database.
+ *
+ * Loading cascade:
+ * 1. Check for ?db=path URL parameter (path may be .db or .db.gz)
+ * 2. Try fetching ./conversations.db.gz (preferred; ~65% smaller)
+ * 3. Try fetching ./conversations.db (backward compat with older exports)
+ * 4. Fall back to file picker (drag-and-drop + input)
+ */
+async function initApp() {
+  var SQL = await initSqlJs({
+    locateFile: function() { return WASM_URL; }
+  });
+
+  // 1. Check URL parameter
+  var urlParams = new URLSearchParams(window.location.search);
+  var dbParam = urlParams.get("db");
+
+  // Only honor a same-origin relative ?db= path. Reject absolute or
+  // protocol-relative URLs so a crafted link cannot load an attacker-
+  // controlled database into this trusted origin.
+  var dbParamSafe = dbParam && !/^[a-z][a-z0-9+.\-]*:/i.test(dbParam) && dbParam.slice(0, 2) !== "//";
+  if (dbParam && !dbParamSafe) {
+    console.warn("Ignoring ?db= with a non-relative URL (same-origin only):", dbParam);
+  }
+  if (dbParamSafe) {
+    try {
+      var buf = await fetchDb(dbParam);
+      db = new SQL.Database(new Uint8Array(buf));
+      onDbLoaded();
+      return;
+    } catch (e) {
+      console.warn("Failed to load DB from ?db= param:", e.message);
+    }
+  }
+
+  // 2. Try compressed default path first (preferred)
+  try {
+    var bufGz = await fetchDb("./conversations.db.gz");
+    db = new SQL.Database(new Uint8Array(bufGz));
+    onDbLoaded();
+    return;
+  } catch (eGz) {
+    /* 3. Fall back to uncompressed .db for older exports */
+    try {
+      var buf2 = await fetchDb("./conversations.db");
+      db = new SQL.Database(new Uint8Array(buf2));
+      onDbLoaded();
+      return;
+    } catch (e) {
+      console.warn("No conversations.db or .db.gz found:", e.message);
+    }
+  }
+
+  // 4. Fall back to file picker
+  showFilePicker(SQL);
+}
+
+/**
+ * Fetch a database file and return its bytes. Transparently decompresses
+ * when the URL ends in .gz (uses the native DecompressionStream API —
+ * no external library needed; supported in all evergreen browsers).
+ * @param {string} url - URL to fetch
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function fetchDb(url) {
+  var resp = await fetch(url);
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  if (/\.gz$/i.test(url)) {
+    var ds = new DecompressionStream("gzip");
+    var piped = resp.body.pipeThrough(ds);
+    return await new Response(piped).arrayBuffer();
+  }
+  return await resp.arrayBuffer();
+}
+
+/**
+ * Show the drag-and-drop file picker overlay.
+ * @param {Object} SQL - Initialized sql.js module
+ */
+function showFilePicker(SQL) {
+  var dropZone = document.getElementById("drop-zone");
+  var fileInput = document.getElementById("file-input");
+  var loading = document.getElementById("loading");
+
+  loading.textContent = "no database found";
+  dropZone.classList.add("visible");
+
+  async function handleFile(file) {
+    try {
+      var buf = await file.arrayBuffer();
+      /* Gzipped drop — decompress transparently */
+      if (/\.gz$/i.test(file.name)) {
+        var ds = new DecompressionStream("gzip");
+        var stream = new Blob([buf]).stream().pipeThrough(ds);
+        buf = await new Response(stream).arrayBuffer();
+      }
+      db = new SQL.Database(new Uint8Array(buf));
+      dropZone.classList.remove("visible");
+      onDbLoaded();
+    } catch (err) {
+      loading.textContent = "failed to load: " + err.message;
+      console.error("file load failed:", err);
+    }
+  }
+
+  fileInput.addEventListener("change", function(e) {
+    if (e.target.files.length > 0) handleFile(e.target.files[0]);
+  });
+
+  dropZone.addEventListener("dragover", function(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+
+  dropZone.addEventListener("drop", function(e) {
+    e.preventDefault();
+    if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+  });
+}
+
+/* -- state ----------------------------------------------------------- */
+var activeFilters = { source: null, tag: null, starred: false, dateFrom: null, dateTo: null };
+var activeConvId = null;
+var searchTimer = null;
+var searchWired = false;
+var hashWired = false;
+var totalConvCount = 0;
+
+/* Monotonic counter incremented whenever the active conversation changes.
+   Streaming chat captures it; if the current epoch diverges, the in-flight
+   SSE loop bails so it does not inject stale tokens into a newer view. */
+var streamEpoch = 0;
+
+/* -- helpers --------------------------------------------------------- */
+
+/**
+ * XSS-safe HTML escaping.
+ * @param {string} s - Raw string
+ * @returns {string} Escaped HTML string
+ */
+function esc(s) {
+  if (s == null) return "";
+  var d = document.createElement("div");
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function escAttr(s) {
+  return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/**
+ * Format an ISO date string to a short display format.
+ * @param {string} iso - ISO date string
+ * @returns {string} Formatted date
+ */
+function fmtDate(iso) {
+  if (!iso) return "";
+  try {
+    var d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch (e) {
+    return String(iso).substring(0, 10);
+  }
+}
+
+/* -- app lifecycle --------------------------------------------------- */
+var chatMode = "librarian";
+
+/** Called after a database is successfully loaded. */
+function onDbLoaded() {
+  var loading = document.getElementById("loading");
+
+  var countRow = query("SELECT count(*) AS n FROM conversations");
+  totalConvCount = countRow.length > 0 ? countRow[0].n : 0;
+  loading.classList.add("hidden");
+  chatMode = "librarian";
+
+  /* Wire the top search box exactly once. openSearchResults handles
+     push-vs-replace routing itself (replace when already in search mode). */
+  if (!searchWired) {
+    var searchBox = document.getElementById("search-box");
+    searchBox.addEventListener("input", function() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function() {
+        var q = searchBox.value.trim();
+        if (q.length >= 2) openSearchResults(q);
+        else if (chatMode !== "home") goHome();
+      }, 200);
+    });
+    searchWired = true;
+  }
+
+  /* Listen for browser back/forward (or manual hash changes). */
+  if (!hashWired) {
+    window.addEventListener("hashchange", renderRoute);
+    hashWired = true;
+  }
+
+  wireNoteDelegation();
+
+  /* Initial route: if URL has a hash, honor it; otherwise show home. */
+  refreshChatUiState();
+  loadSettings();
+  renderRoute();
+}
+
+/** Sentinel element IDs in #messages that are preserved across mode changes. */
+var MODE_SENTINELS = { welcome: 1, loading: 1, "home-recent": 1 };
+
+/** Remove every child of #messages that is not a sentinel (welcome/loading/
+  * home-recent). Each mode (home, conv, search, marginalia) calls this before
+  * injecting its own content. Sentinels are reused across modes via hide/show. */
+function clearModeContent() {
+  var container = document.getElementById("messages");
+  var children = Array.from(container.children);
+  for (var i = 0; i < children.length; i++) {
+    if (!MODE_SENTINELS[children[i].id]) container.removeChild(children[i]);
+  }
+  return container;
+}
+
+/** Show or hide the home sentinels (welcome hero + recent list) in one call. */
+function setHomeSentinelsVisible(visible) {
+  var welcome = document.getElementById("welcome");
+  var homeRecent = document.getElementById("home-recent");
+  var method = visible ? "remove" : "add";
+  if (welcome) welcome.classList[method]("hidden");
+  if (homeRecent) homeRecent.classList[method]("hidden");
+}
+
+/** Render the single-column home: welcome hero + filter chips + recent. */
+function renderHome() {
+  streamEpoch++;
+  chatMode = "home";
+  activeConvId = null;
+  setTopBarMode(null);
+  clearModeContent();
+  setHomeSentinelsVisible(true);
+  renderWelcomeStats();
+  renderFilters();
+  loadConversations();
+  refreshChatUiState();
+}
+
+/** Show/hide the back chevron + mode label in the top bar. */
+function setTopBarMode(label) {
+  var chevron = document.getElementById("back-chevron");
+  var modeLabel = document.getElementById("mode-label");
+  if (!chevron || !modeLabel) return;
+  if (label) {
+    chevron.classList.remove("hidden");
+    modeLabel.classList.remove("hidden");
+    modeLabel.textContent = label;
+  } else {
+    chevron.classList.add("hidden");
+    modeLabel.classList.add("hidden");
+    modeLabel.textContent = "";
+  }
+}
+
+/* -- hash router ----------------------------------------------------- */
+/* Routes: (empty) home | #/conv/:id | #/search/:query | #/marginalia.
+   Mode entry-points update location.hash (pushing history). Browser
+   back/forward fires hashchange which routes back to the matching state. */
+
+/* While true, mode entry-points are running because of a route change,
+   so they should NOT update the hash (would cause loops). */
+var routingFromHash = false;
+
+/** decodeURIComponent but fall back to the raw string on malformed input. */
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+
+/** Parse location.hash into a route descriptor. */
+function parseRoute() {
+  var h = (location.hash || "").replace(/^#\/?/, "");
+  if (!h) return { mode: "home" };
+  var slash = h.indexOf("/");
+  var head = slash === -1 ? h : h.substring(0, slash);
+  var tail = slash === -1 ? "" : h.substring(slash + 1);
+  if (head === "conv" && tail) return { mode: "conv", id: safeDecode(tail) };
+  if (head === "search") return { mode: "search", query: tail ? safeDecode(tail) : "" };
+  if (head === "marginalia") return { mode: "marginalia" };
+  if (head === "chat") return { mode: "chat" };
+  return { mode: "home" };
+}
+
+/** Build a route string from a descriptor. */
+function buildRoute(r) {
+  if (!r || r.mode === "home") return "";
+  if (r.mode === "conv") return "#/conv/" + encodeURIComponent(r.id);
+  if (r.mode === "search") return "#/search/" + encodeURIComponent(r.query || "");
+  if (r.mode === "marginalia") return "#/marginalia";
+  if (r.mode === "chat") return "#/chat";
+  return "";
+}
+
+/** Change location.hash to reflect the given route. Push by default;
+   replace when the new route is a same-mode refinement (e.g. typing in
+   search while already in search). Returns true if the URL actually
+   changed (so the caller can decide whether to render manually or wait
+   for hashchange). No-op when we are routing from hash. */
+function setRoute(r, opts) {
+  if (routingFromHash) return false;
+  opts = opts || {};
+  var target = buildRoute(r);
+  var current = location.hash || "";
+  if (current === target) return false;
+  if (opts.replace) {
+    /* replaceState preserves forward history; URL path stays the same */
+    var base = location.pathname + location.search;
+    history.replaceState(null, "", base + target);
+  } else {
+    location.hash = target;
+  }
+  return true;
+}
+
+/** Route to whatever location.hash currently says, without pushing. */
+function renderRoute() {
+  if (!db) return;  /* renderRoute re-fires once DB is loaded */
+  routingFromHash = true;
+  try {
+    var r = parseRoute();
+    if (r.mode === "conv") {
+      openConversation(r.id);
+    } else if (r.mode === "search") {
+      var sb = document.getElementById("search-box");
+      if (sb) sb.value = r.query || "";
+      if ((r.query || "").length >= 2) openSearchResults(r.query);
+      else renderHome();
+    } else if (r.mode === "marginalia") {
+      openMarginalia();
+    } else if (r.mode === "chat") {
+      openChat();
+    } else {
+      var sb2 = document.getElementById("search-box");
+      if (sb2) sb2.value = "";
+      renderHome();
+    }
+  } finally {
+    routingFromHash = false;
+  }
+}
+
+/** Populate the welcome hero stats tiles + per-source breakdown. */
+function renderWelcomeStats() {
+  var stats = document.getElementById("welcome-stats");
+  var sources = document.getElementById("welcome-sources");
+  if (!stats || !sources) return;
+  stats.textContent = "";
+  sources.textContent = "";
+
+  function card(value, label) {
+    var el = document.createElement("div");
+    el.className = "welcome-stat";
+    var v = document.createElement("div");
+    v.className = "welcome-stat-value";
+    v.textContent = value;
+    var l = document.createElement("div");
+    l.className = "welcome-stat-label";
+    l.textContent = label;
+    el.appendChild(v); el.appendChild(l);
+    return el;
+  }
+  function fmt(n) { return Number(n).toLocaleString(); }
+  function yearSpan(min, max) {
+    var a = (min || "").slice(0, 4); var b = (max || "").slice(0, 4);
+    if (!a) return "—"; if (a === b) return a; return a + "\u2013" + b;
+  }
+
+  var total = query("SELECT COUNT(*) AS n FROM conversations")[0].n;
+  var msgs = query("SELECT COUNT(*) AS n FROM messages")[0].n;
+  var notes = 0;
+  try { notes = query("SELECT COUNT(*) AS n FROM notes")[0].n; } catch (e) {}
+  var span = query("SELECT MIN(created_at) AS a, MAX(updated_at) AS b FROM conversations")[0];
+
+  stats.appendChild(card(fmt(total), "conversations"));
+  stats.appendChild(card(fmt(msgs), "messages"));
+  stats.appendChild(card(fmt(notes), "notes"));
+  stats.appendChild(card(yearSpan(span.a, span.b), "years"));
+
+  /* Source breakdown pills */
+  var srcRows = query(
+    "SELECT source, COUNT(*) AS n FROM conversations "
+    + "WHERE source IS NOT NULL AND source != '' "
+    + "GROUP BY source ORDER BY n DESC"
+  );
+  for (var i = 0; i < srcRows.length; i++) {
+    var row = srcRows[i];
+    var item = document.createElement("span");
+    item.className = "welcome-source-item";
+    var dot = document.createElement("span");
+    dot.className = "source-dot source-" + (row.source || "other");
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(row.source + " " + fmt(row.n)));
+    sources.appendChild(item);
+  }
+}
+
+/**
+ * Render source chips, tag chips (top 10), and starred toggle.
+ * Click toggles activeFilters and reloads the conversation list.
+ *
+ * All user-provided strings are escaped via esc() before insertion
+ * to prevent XSS. The esc() function uses textContent assignment
+ * on a detached element, which is a standard safe escaping pattern.
+ */
+function renderFilters() {
+  var container = document.getElementById("filters");
+  var chips = [];
+
+  /* Source chips */
+  var sources = query("SELECT DISTINCT source FROM conversations WHERE source IS NOT NULL AND source != '' ORDER BY source");
+  for (var i = 0; i < sources.length; i++) {
+    var src = sources[i].source;
+    var cls = activeFilters.source === src ? "filter-chip active" : "filter-chip";
+    chips.push({cls: cls, filter: "source", value: src, label: src});
+  }
+
+  /* Tag chips (top 10 by frequency) */
+  var tags = query("SELECT tag, count(*) AS n FROM tags GROUP BY tag ORDER BY n DESC LIMIT 10");
+  for (var j = 0; j < tags.length; j++) {
+    var tag = tags[j].tag;
+    var cls2 = activeFilters.tag === tag ? "filter-chip active" : "filter-chip";
+    chips.push({cls: cls2, filter: "tag", value: tag, label: "#" + tag});
+  }
+
+  /* Starred toggle */
+  var starCls = activeFilters.starred ? "filter-chip active" : "filter-chip";
+  chips.push({cls: starCls, filter: "starred", value: "", label: "starred"});
+
+  /* Build DOM safely */
+  container.textContent = "";
+  for (var k = 0; k < chips.length; k++) {
+    var chip = chips[k];
+    var span = document.createElement("span");
+    span.className = chip.cls;
+    span.setAttribute("data-filter", chip.filter);
+    span.setAttribute("data-value", chip.value);
+    span.textContent = chip.label;
+    span.addEventListener("click", function() {
+      var filterType = this.getAttribute("data-filter");
+      var filterValue = this.getAttribute("data-value");
+      if (filterType === "source") {
+        activeFilters.source = activeFilters.source === filterValue ? null : filterValue;
+      } else if (filterType === "tag") {
+        activeFilters.tag = activeFilters.tag === filterValue ? null : filterValue;
+      } else if (filterType === "starred") {
+        activeFilters.starred = !activeFilters.starred;
+      }
+      renderFilters();
+      loadConversations();
+    });
+    container.appendChild(span);
+  }
+}
+
+/**
+ * Load the conversation list into the sidebar.
+ *
+ * Builds SQL dynamically based on search term and active filters.
+ * All user-provided strings are escaped via esc() before insertion
+ * to prevent XSS. Uses parameterized queries for SQL injection safety.
+ */
+function loadConversations() {
+  var searchBox = document.getElementById("search-box");
+  var searchTerm = searchBox ? searchBox.value.trim() : "";
+  var convList = document.getElementById("conv-list");
+
+  var sql, params = [];
+
+  var notesCol = ", (SELECT COUNT(*) FROM notes n WHERE n.conversation_id = c.id) AS note_count";
+  if (searchTerm) {
+    sql = "SELECT DISTINCT c.id, c.title, c.source, c.model, c.message_count, c.updated_at, c.starred_at" + notesCol + " FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE m.content LIKE '%' || ? || '%'";
+    params.push(searchTerm);
+  } else {
+    sql = "SELECT c.id, c.title, c.source, c.model, c.message_count, c.updated_at, c.starred_at" + notesCol + " FROM conversations c WHERE 1=1";
+  }
+
+  /* Apply filters */
+  if (activeFilters.source) {
+    sql += " AND c.source = ?";
+    params.push(activeFilters.source);
+  }
+  if (activeFilters.tag) {
+    sql += " AND EXISTS (SELECT 1 FROM tags t WHERE t.conversation_id = c.id AND t.tag = ?)";
+    params.push(activeFilters.tag);
+  }
+  if (activeFilters.starred) {
+    sql += " AND c.starred_at IS NOT NULL";
+  }
+  if (activeFilters.dateFrom) {
+    sql += " AND c.updated_at >= ?";
+    params.push(activeFilters.dateFrom);
+  }
+  if (activeFilters.dateTo) {
+    sql += " AND c.updated_at <= ?";
+    params.push(activeFilters.dateTo);
+  }
+
+  sql += " ORDER BY c.updated_at DESC LIMIT 500";
+
+  var rows;
+  try {
+    rows = query(sql, params.length > 0 ? params : undefined);
+  } catch (e) {
+    console.error("loadConversations query error:", e);
+    rows = [];
+  }
+
+  /* Build DOM safely using createElement + textContent */
+  convList.textContent = "";
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var title = r.title || "Untitled";
+
+    var item = document.createElement("div");
+    item.className = "conv-item";
+    item.setAttribute("data-id", r.id);
+
+    var titleDiv = document.createElement("div");
+    titleDiv.className = "conv-item-title";
+    titleDiv.textContent = (r.starred_at ? "\u2605 " : "") + title;
+    if (r.note_count && r.note_count > 0) {
+      var badge = document.createElement("span");
+      badge.className = "conv-item-note-badge";
+      badge.textContent = " \u270e" + (r.note_count > 1 ? r.note_count : "");
+      badge.title = r.note_count + " note" + (r.note_count !== 1 ? "s" : "");
+      titleDiv.appendChild(badge);
+    }
+    item.appendChild(titleDiv);
+
+    var metaDiv = document.createElement("div");
+    metaDiv.className = "conv-item-meta";
+    /* Source dot + label */
+    if (r.source) {
+      var dot = document.createElement("span");
+      dot.className = "source-dot source-" + r.source;
+      metaDiv.appendChild(dot);
+      metaDiv.appendChild(document.createTextNode(r.source));
+    }
+    if (r.message_count != null) {
+      var sep1 = document.createElement("span");
+      sep1.textContent = "\u00b7";
+      sep1.style.color = "var(--text-subtle)";
+      metaDiv.appendChild(sep1);
+      metaDiv.appendChild(document.createTextNode(r.message_count + " msgs"));
+    }
+    if (r.updated_at) {
+      var sep2 = document.createElement("span");
+      sep2.textContent = "\u00b7";
+      sep2.style.color = "var(--text-subtle)";
+      metaDiv.appendChild(sep2);
+      metaDiv.appendChild(document.createTextNode(fmtDate(r.updated_at)));
+    }
+    item.appendChild(metaDiv);
+
+    (function(convId) {
+      item.addEventListener("click", function() { openConversation(convId); });
+    })(r.id);
+
+    convList.appendChild(item);
+  }
+
+  if (rows.length === 0) {
+    var empty = document.createElement("div");
+    empty.style.cssText = "padding: var(--gap); color: var(--text-muted); font-size: var(--font-size-sm);";
+    empty.textContent = "no conversations found";
+    convList.appendChild(empty);
+  }
+
+  /* Update footer count (uses cached totalConvCount from onDbLoaded) */
+  var status = document.getElementById("db-status");
+  if (status) {
+    if (searchTerm || activeFilters.source || activeFilters.tag || activeFilters.starred) {
+      status.textContent = rows.length + " / " + totalConvCount + " conversations";
+    } else {
+      status.textContent = totalConvCount + " conversation" + (totalConvCount !== 1 ? "s" : "");
+    }
+  }
+}
+
+/**
+ * Open a conversation by ID and render it in the main panel.
+ * @param {string} convId - Conversation ID
+ */
+function openConversation(convId) {
+  setRoute({ mode: "conv", id: convId });
+  /* Invalidate any in-flight stream from a previous conversation. */
+  streamEpoch++;
+  activeConvId = convId;
+  chatMode = "conversation";
+  refreshChatUiState();
+  setHomeSentinelsVisible(false);
+  setTopBarMode("conversation");
+  /* Scroll to top for a fresh read */
+  window.scrollTo({ top: 0, behavior: "instant" });
+
+  /* Query conversation metadata */
+  var convRows = query("SELECT * FROM conversations WHERE id = ?", [convId]);
+  if (convRows.length === 0) return;
+  var conv = convRows[0];
+
+  /* Query messages ordered by created_at */
+  var messages = query(
+    "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+    [convId]
+  );
+
+  /* Query tags */
+  var tagRows = query("SELECT tag FROM tags WHERE conversation_id = ?", [convId]);
+  var tags = [];
+  for (var t = 0; t < tagRows.length; t++) tags.push(tagRows[t].tag);
+
+  renderConversation(conv, messages, tags);
+}
+
+/**
+ * Render conversation header, messages, and input area.
+ * @param {Object} conv - Conversation row
+ * @param {Array} messages - Message rows
+ * @param {Array<string>} tags - Tag strings
+ */
+function renderConversation(conv, messages, tags) {
+  var container = document.getElementById("messages");
+  var inputArea = document.getElementById("input-area");
+
+  /* Load notes for this conversation */
+  loadNotesForConversation(conv.id);
+
+  /* Build messages HTML */
+  var html = "";
+
+  /* Conversation header block */
+  html += '<div class="conv-header">';
+  html += "<h2>" + esc(conv.title || "Untitled") + "</h2>";
+  var meta = [];
+  if (conv.source) meta.push(esc(conv.source));
+  if (conv.model) meta.push(esc(conv.model));
+  meta.push(messages.length + " messages");
+  if (conv.created_at) meta.push(fmtDate(conv.created_at));
+  html += '<div class="conv-header-meta">' + meta.join(" &middot; ") + "</div>";
+  if (tags.length > 0) {
+    html += '<div class="conv-header-tags">';
+    for (var t = 0; t < tags.length; t++) {
+      html += '<span class="conv-tag">' + esc(tags[t]) + "</span>";
+    }
+    html += "</div>";
+  }
+  html += addNoteBtn("conversation", conv.id, null);
+  html += "</div>";
+
+  /* Render each message (skipping those with no visible content) */
+  for (var i = 0; i < messages.length; i++) {
+    var msg = messages[i];
+    var role = msg.role || "unknown";
+    var roleCls = (role === "user" || role === "assistant" || role === "system") ? role : "";
+
+    /* Parse content blocks from JSON */
+    var blocks = [];
+    try {
+      var parsed = JSON.parse(msg.content);
+      if (Array.isArray(parsed)) {
+        blocks = parsed;
+      } else if (typeof parsed === "string") {
+        blocks = [{ type: "text", text: parsed }];
+      } else {
+        blocks = [parsed];
+      }
+    } catch (e) {
+      /* If not JSON, treat as plain text */
+      blocks = [{ type: "text", text: String(msg.content || "") }];
+    }
+
+    /* Skip messages whose content is entirely empty (e.g. empty system prompts) */
+    var hasVisible = false;
+    for (var b = 0; b < blocks.length; b++) {
+      var blk = blocks[b] || {};
+      if (blk.type === "text" && blk.text && String(blk.text).trim()) { hasVisible = true; break; }
+      if (blk.type && blk.type !== "text") { hasVisible = true; break; }
+    }
+    if (!hasVisible) continue;
+
+    html += '<div class="message ' + roleCls + '" data-msg-id="' + escAttr(msg.id) + '">';
+    html += '<div class="message-role">' + esc(role) + "</div>";
+    html += '<div class="message-content">';
+
+    html += renderContent(blocks);
+    html += "</div>";
+    html += addNoteBtn("message", conv.id, msg.id);
+    html += "</div>";
+  }
+
+  /* Clear previous mode content and hide sentinels (openConversation
+     already hid them; this is idempotent for direct callers).
+     The conv-view wrapper lets goHome cleanly tear down without
+     wiping the sentinel elements. */
+  clearModeContent();
+  setHomeSentinelsVisible(false);
+  var convWrap = document.createElement("div");
+  convWrap.className = "conv-view";
+  convWrap.innerHTML = html;
+  container.appendChild(convWrap);
+
+  /* Render conversation-level notes after header */
+  var headerEl = container.querySelector(".conv-header");
+  if (headerEl) renderConversationNotes(headerEl, conv.id);
+
+  /* Render message-level notes */
+  var msgDivs = container.querySelectorAll(".message[data-msg-id]");
+  for (var j = 0; j < msgDivs.length; j++) {
+    var msgDiv = msgDivs[j];
+    var msgId = msgDiv.getAttribute("data-msg-id");
+    renderNotesForMessage(msgDiv, conv.id, msgId);
+  }
+
+  /* Show input area */
+  inputArea.classList.remove("hidden");
+}
+
+/**
+ * Render an array of content blocks to HTML.
+ * @param {Array<Object>} blocks - Content blocks
+ * @returns {string} HTML string
+ */
+function renderContent(blocks) {
+  var parts = [];
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
+    var btype = b.type || "";
+    if (btype === "text" && b.text) {
+      parts.push(renderMarkdown(b.text));
+    } else if (btype === "media") {
+      parts.push(renderMedia(b));
+    }
+    /* Skip tool_use, tool_result, thinking */
+  }
+  return parts.join("");
+}
+
+/**
+ * Render a media content block to HTML.
+ * @param {Object} block - Media block with media_type, url, data, filename
+ * @returns {string} HTML string
+ */
+/**
+ * Return url if it uses an allowed scheme, else "".
+ * Allowed: https?:, data:(image|audio|video)/..., assets/..., mailto:
+ */
+function safeMediaUrl(url) {
+  if (!url) return "";
+  /* Reject URLs containing HTML-dangerous characters. Stops attribute
+     escape via crafted filenames like foo" onerror="alert(1)".png even
+     though escAttr quotes attributes — defense in depth. */
+  if (/["\'<>`\s]/.test(url)) return "";
+  if (/^https?:/i.test(url)) return url;
+  if (/^data:(image|audio|video)\//i.test(url)) return url;
+  if (/^assets\//i.test(url)) return url;
+  if (/^mailto:/i.test(url)) return url;
+  return "";
+}
+
+function renderMedia(block) {
+  var mt = block.media_type || "";
+  var url = block.url || "";
+  var data = block.data || "";
+  var fname = block.filename || "";
+
+  /* Build data URI if we have base64 data and no url */
+  if (!url && data && mt) {
+    url = "data:" + mt + ";base64," + data;
+  }
+
+  /* Reject any URL that is not in the safe allowlist */
+  var safeUrl = safeMediaUrl(url);
+  if (!safeUrl) {
+    var kind = mt.split("/")[0] || "attachment";
+    var label = fname || (kind + " not available");
+    return '<span class="media-missing" title="Original URL: ' + escAttr(url) + '">\u{1F5BC} ' + esc(label) + '</span>';
+  }
+
+  if (mt.startsWith("image/")) {
+    return '<img src="' + escAttr(safeUrl) + '" alt="' + escAttr(fname || "image") + '" loading="lazy">';
+  }
+  if (mt.startsWith("audio/")) {
+    return '<audio controls src="' + escAttr(safeUrl) + '"></audio>';
+  }
+  if (mt.startsWith("video/")) {
+    return '<video controls src="' + escAttr(safeUrl) + '"></video>';
+  }
+  return '<a href="' + escAttr(safeUrl) + '" target="_blank" rel="noopener noreferrer">' + esc(fname || "attachment") + "</a>";
+}
+
+/**
+ * Lightweight markdown-to-HTML renderer.
+ * Handles fenced code blocks, inline code, headings, bold, italic,
+ * images, links, horizontal rules, unordered lists, and paragraphs.
+ * @param {string} text - Raw markdown text
+ * @returns {string} HTML string
+ */
+function renderMarkdown(text) {
+  if (!text) return "";
+
+  /* Escape HTML entities first */
+  text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  /* Extract fenced code blocks and replace with placeholders */
+  var codeBlocks = [];
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, function(m, lang, code) {
+    var idx = codeBlocks.length;
+    var cls = lang ? ' class="language-' + lang + '"' : "";
+    codeBlocks.push("<pre><code" + cls + ">" + code + "</code></pre>");
+    return "\x00CB" + idx + "\x00";
+  });
+
+  /* Extract inline code and replace with placeholders */
+  var inlineCodes = [];
+  text = text.replace(/`([^`\n]+)`/g, function(m, code) {
+    var idx = inlineCodes.length;
+    inlineCodes.push("<code>" + code + "</code>");
+    return "\x00IC" + idx + "\x00";
+  });
+
+  /* Headings */
+  text = text.replace(/^#### (.+)$/gm, "<h4>$1</h4>");
+  text = text.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+  text = text.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+  text = text.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+
+  /* Horizontal rules */
+  text = text.replace(/^---+$/gm, "<hr>");
+
+  /* Unordered lists */
+  text = text.replace(/^[*-] (.+)$/gm, "<li>$1</li>");
+  text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>");
+
+  /* Images: ![alt](url) */
+  text = text.replace(/!\[([^\]]*)]\(([^)]+)\)/g, function(m, alt, url) {
+    if (/^(https?:|data:image\/|assets\/)/.test(url)) return '<img src="' + escAttr(url) + '" alt="' + escAttr(alt) + '" loading="lazy">';
+    return m;
+  });
+
+  /* Links: [text](url) */
+  text = text.replace(/\[([^\]]+)]\(([^)]+)\)/g, function(m, text2, url) {
+    if (/^(https?:|mailto:|#)/.test(url)) return '<a href="' + escAttr(url) + '" target="_blank" rel="noopener noreferrer">' + text2 + '</a>';
+    return m;
+  });
+
+  /* Bold+italic: ***text*** */
+  text = text.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
+
+  /* Bold: **text** */
+  text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  /* Italic: *text* */
+  text = text.replace(/\*(.+?)\*/g, "<em>$1</em>");
+
+  /* Paragraph breaks: double newline */
+  text = text.replace(/\n\n+/g, "</p><p>");
+
+  /* Single newlines to <br> (but not inside block elements) */
+  text = text.replace(/\n/g, "<br>");
+
+  /* Wrap in paragraph if not starting with block element */
+  if (!/^\s*<(h[1-4]|pre|ul|hr|p)/.test(text)) {
+    text = "<p>" + text + "</p>";
+  }
+
+  /* Restore inline code placeholders */
+  text = text.replace(/\x00IC(\d+)\x00/g, function(m, idx) {
+    return inlineCodes[parseInt(idx)];
+  });
+
+  /* Restore code block placeholders */
+  text = text.replace(/\x00CB(\d+)\x00/g, function(m, idx) {
+    return codeBlocks[parseInt(idx)];
+  });
+
+  return text;
+}
+
+/* (Timeline removed with the single-column refresh.) */
+
+/** Browse all marginalia (notes) across the archive. */
+/** Librarian chat: the model can query the whole archive via SQL tool-use.
+  * Lives in the main panel with a chat-style input at the bottom. */
+function openChat() {
+  if (!db) return;
+  setRoute({ mode: "chat" });
+  streamEpoch++;
+  activeConvId = null;
+  chatMode = "librarian";
+  librarianMessages = [];
+  var container = document.getElementById("messages");
+  var titleEl = document.getElementById("conv-title");
+
+  setHomeSentinelsVisible(false);
+  setTopBarMode("chat");
+  refreshChatUiState();
+  window.scrollTo({ top: 0, behavior: "instant" });
+  clearModeContent();
+
+  /* Build the chat welcome (what the librarian can do). */
+  var wrap = document.createElement("div");
+  wrap.className = "chat-view";
+  var intro = document.createElement("div");
+  intro.className = "chat-intro";
+  var h = document.createElement("h2");
+  h.className = "chat-intro-title";
+  h.textContent = "Ask the librarian";
+  intro.appendChild(h);
+  var p = document.createElement("p");
+  p.className = "chat-intro-body";
+  p.textContent = "I can search your archive, surface conversations by topic, summarize threads, or count things. I query the SQLite database via tool-use; you\u2019ll see the SQL as I run it. Ask in your own words.";
+  intro.appendChild(p);
+  var notConfigured = !isChatConfigured();
+  if (notConfigured) {
+    var warn = document.createElement("p");
+    warn.className = "chat-intro-body";
+    warn.style.color = "var(--warning)";
+    warn.textContent = "Chat is disabled. Open Settings (\u2699) to add an API endpoint and key.";
+    intro.appendChild(warn);
+  } else if ((localStorage.getItem("llm_memex_provider") || "anthropic") !== "anthropic") {
+    var toolNote = document.createElement("p");
+    toolNote.className = "chat-intro-body";
+    toolNote.style.color = "var(--warning)";
+    toolNote.textContent = "Librarian tool-use currently requires the Anthropic provider. Change it in Settings (\u2699) to ask questions that need SQL queries; OpenAI-compatible endpoints can still chat but cannot run queries.";
+    intro.appendChild(toolNote);
+  }
+  wrap.appendChild(intro);
+  var chatLog = document.createElement("div");
+  chatLog.id = "librarian-log";
+  chatLog.className = "chat-log";
+  wrap.appendChild(chatLog);
+  container.appendChild(wrap);
+}
+
+function openMarginalia() {
+  if (!db) return;
+  setRoute({ mode: "marginalia" });
+  streamEpoch++;
+  activeConvId = null;
+  chatMode = "marginalia";
+
+  setHomeSentinelsVisible(false);
+  setTopBarMode("marginalia");
+  refreshChatUiState();
+  window.scrollTo({ top: 0, behavior: "instant" });
+
+  /* Query all notes with conversation context */
+  var rows = query(
+    "SELECT n.id, n.conversation_id, n.message_id, n.target_kind, n.text, n.kind, n.created_at, "
+    + "c.title as conv_title, c.source as conv_source "
+    + "FROM notes n LEFT JOIN conversations c ON c.id = n.conversation_id "
+    + "ORDER BY n.created_at DESC"
+  );
+
+  var container = clearModeContent();
+  var header = document.createElement("div");
+  header.className = "marginalia-header";
+  header.textContent = rows.length + " note" + (rows.length !== 1 ? "s" : "") + " across the archive";
+  container.appendChild(header);
+
+  if (rows.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "marginalia-empty";
+    empty.textContent = "No notes yet. Open a conversation and click the pencil icon to annotate a message or the conversation itself.";
+    container.appendChild(empty);
+    return;
+  }
+
+  /* Optional client-side filter */
+  var filterBox = document.createElement("input");
+  filterBox.type = "text";
+  filterBox.className = "marginalia-filter";
+  filterBox.placeholder = "filter notes by text or conversation title...";
+  container.appendChild(filterBox);
+
+  var listEl = document.createElement("div");
+  listEl.className = "marginalia-list";
+  container.appendChild(listEl);
+
+  function renderList(searchTerm) {
+    listEl.textContent = "";
+    var term = (searchTerm || "").toLowerCase();
+    for (var i = 0; i < rows.length; i++) {
+      var n = rows[i];
+      var title = n.conv_title || "(unknown conversation)";
+      if (term) {
+        var hay = (n.text || "").toLowerCase() + " " + title.toLowerCase();
+        if (hay.indexOf(term) === -1) continue;
+      }
+      var card = document.createElement("div");
+      card.className = "marginalia-card";
+      var noteText = document.createElement("div");
+      noteText.className = "marginalia-card-text";
+      noteText.textContent = n.text || "";
+      card.appendChild(noteText);
+
+      var meta = document.createElement("div");
+      meta.className = "marginalia-card-meta";
+      var titleLink = document.createElement("a");
+      titleLink.className = "marginalia-card-title";
+      titleLink.href = "#";
+      titleLink.textContent = title;
+      (function(cid) {
+        titleLink.addEventListener("click", function(ev) {
+          ev.preventDefault();
+          openConversation(cid);
+        });
+      })(n.conversation_id);
+      meta.appendChild(titleLink);
+
+      var scope = document.createElement("span");
+      scope.className = "marginalia-card-scope";
+      scope.textContent = n.target_kind === "message" ? "on message" : "on conversation";
+      meta.appendChild(scope);
+
+      if (n.conv_source) {
+        var src = document.createElement("span");
+        src.className = "marginalia-card-source";
+        src.textContent = n.conv_source;
+        meta.appendChild(src);
+      }
+
+      var date = document.createElement("span");
+      date.className = "marginalia-card-date";
+      date.textContent = fmtDate(n.created_at);
+      meta.appendChild(date);
+
+      card.appendChild(meta);
+      listEl.appendChild(card);
+    }
+    if (listEl.children.length === 0 && term) {
+      var none = document.createElement("div");
+      none.className = "marginalia-empty";
+      none.textContent = "No notes match \"" + searchTerm + "\".";
+      listEl.appendChild(none);
+    }
+  }
+
+  filterBox.addEventListener("input", function() { renderList(filterBox.value.trim()); });
+  renderList("");
+}
+
+/** Full-archive search with ranked snippets.
+  * Ranking: message_count DESC (total matches per conv), then updated_at DESC.
+  * Snippet: 80 chars before and after the first match in each top-ranked message. */
+function openSearchResults(initialTerm) {
+  if (!db) return;
+  /* Same-mode refinement (typing within search) replaces history.
+     Transition from another mode pushes a new history entry. */
+  var sameMode = chatMode === "search";
+  setRoute({ mode: "search", query: initialTerm || "" }, sameMode ? { replace: true } : {});
+  if (!sameMode) streamEpoch++;
+  activeConvId = null;
+  chatMode = "search";
+
+  setHomeSentinelsVisible(false);
+  setTopBarMode("search");
+  refreshChatUiState();
+
+  var container = clearModeContent();
+
+  var status = document.createElement("div");
+  status.className = "search-results-status";
+  status.textContent = "searching\u2026";
+  container.appendChild(status);
+
+  var listEl = document.createElement("div");
+  listEl.className = "search-results-list";
+  container.appendChild(listEl);
+
+  function runSearch(term) {
+    term = (term || "").trim();
+    listEl.textContent = "";
+    if (term.length < 2) {
+      status.textContent = "Enter at least 2 characters to search.";
+      return;
+    }
+    status.textContent = "searching...";
+    /* Rank by per-conversation match count */
+    var ranked;
+    try {
+      ranked = query(
+        "SELECT c.id, c.title, c.source, c.updated_at, COUNT(*) AS match_count "
+        + "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+        + "WHERE m.content LIKE ? "
+        + "GROUP BY c.id ORDER BY match_count DESC, c.updated_at DESC LIMIT 40",
+        ["%" + term + "%"]
+      );
+    } catch (e) {
+      status.textContent = "search failed: " + e.message;
+      return;
+    }
+    if (ranked.length === 0) {
+      status.textContent = "No conversations match \"" + term + "\".";
+      return;
+    }
+    status.textContent = ranked.length + " conversation" + (ranked.length !== 1 ? "s" : "") + " match \"" + term + "\"";
+
+    for (var i = 0; i < ranked.length; i++) {
+      var r = ranked[i];
+      var card = document.createElement("div");
+      card.className = "search-result-card";
+
+      /* Clickable title */
+      var title = document.createElement("a");
+      title.href = "#";
+      title.className = "search-result-title";
+      title.textContent = r.title || "(untitled)";
+      (function(cid) {
+        title.addEventListener("click", function(ev) { ev.preventDefault(); openConversation(cid); });
+      })(r.id);
+      card.appendChild(title);
+
+      var meta = document.createElement("div");
+      meta.className = "search-result-meta";
+      var mm = r.match_count + " match" + (r.match_count !== 1 ? "es" : "");
+      meta.textContent = mm + " \u00b7 " + (r.source || "") + " \u00b7 " + fmtDate(r.updated_at);
+      card.appendChild(meta);
+
+      /* Get 1-3 snippet rows with the match context */
+      var snippets;
+      try {
+        snippets = query(
+          "SELECT content FROM messages WHERE conversation_id = ? AND content LIKE ? LIMIT 3",
+          [r.id, "%" + term + "%"]
+        );
+      } catch (e) { snippets = []; }
+      for (var s = 0; s < snippets.length; s++) {
+        var snippetText = extractSnippet(snippets[s].content, term);
+        if (!snippetText) continue;
+        var sn = document.createElement("div");
+        sn.className = "search-result-snippet";
+        appendHighlightedText(sn, snippetText, term);
+        card.appendChild(sn);
+      }
+      listEl.appendChild(card);
+    }
+  }
+
+  /* Use the query passed in (driven by the top search box). */
+  runSearch(initialTerm);
+}
+
+/** Extract a snippet of ~160 chars around the first match in a message's
+  * content JSON. Strips non-text blocks. */
+function extractSnippet(contentJson, term) {
+  var text;
+  try {
+    var parsed = JSON.parse(contentJson);
+    if (Array.isArray(parsed)) {
+      text = parsed.filter(function(b) { return b && b.type === "text"; })
+                   .map(function(b) { return b.text || ""; })
+                   .join(" ");
+    } else if (typeof parsed === "string") {
+      text = parsed;
+    } else {
+      text = String(contentJson || "");
+    }
+  } catch (e) { text = String(contentJson || ""); }
+  if (!text) return "";
+  var idx = text.toLowerCase().indexOf(term.toLowerCase());
+  if (idx === -1) return "";
+  var start = Math.max(0, idx - 80);
+  var end = Math.min(text.length, idx + term.length + 80);
+  var snippet = text.substring(start, end);
+  if (start > 0) snippet = "\u2026" + snippet;
+  if (end < text.length) snippet = snippet + "\u2026";
+  return snippet;
+}
+
+/** Append `text` to `el`, with case-insensitive matches of `term` wrapped
+  * in <mark> tags. Uses DOM nodes (no innerHTML) so untrusted text is safe. */
+function appendHighlightedText(el, text, term) {
+  if (!term) { el.appendChild(document.createTextNode(text)); return; }
+  var lowText = text.toLowerCase();
+  var lowTerm = term.toLowerCase();
+  var i = 0;
+  while (i < text.length) {
+    var hit = lowText.indexOf(lowTerm, i);
+    if (hit === -1) {
+      el.appendChild(document.createTextNode(text.substring(i)));
+      return;
+    }
+    if (hit > i) el.appendChild(document.createTextNode(text.substring(i, hit)));
+    var mark = document.createElement("mark");
+    mark.textContent = text.substring(hit, hit + lowTerm.length);
+    el.appendChild(mark);
+    i = hit + lowTerm.length;
+  }
+}
+
+/** Return to librarian welcome state. */
+function goHome() {
+  var changed = setRoute({ mode: "home" });
+  var searchBox = document.getElementById("search-box");
+  if (searchBox) searchBox.value = "";
+  librarianMessages = [];
+  /* If setRoute changed the hash, the hashchange handler will render
+     home via renderRoute. Only render manually if we were already at
+     home (no URL change, no hashchange). Avoids the double-render. */
+  if (!changed) renderHome();
+}
+
+/* -- notes (marginalia) ---------------------------------------------- */
+
+/* Notes cache: { conversation_id: [note, ...] } */
+var notesCache = {};
+
+function loadNotesForConversation(convId) {
+  try {
+    var rows = query("SELECT id, target_kind, conversation_id, message_id, text, created_at, updated_at FROM notes WHERE conversation_id = ?", [convId]);
+    notesCache[convId] = rows;
+    return rows;
+  } catch (e) {
+    /* DB may lack notes table (pre-0.11.0 archives) */
+    notesCache[convId] = [];
+    return [];
+  }
+}
+
+/** Append a list of note rows to `container` as .note divs. Shared between
+  * message-scoped (renderNotesForMessage) and conversation-scoped
+  * (renderConversationNotes) renderers since the card DOM is identical. */
+function appendNoteCards(container, notes) {
+  for (var i = 0; i < notes.length; i++) {
+    var n = notes[i];
+    var div = document.createElement("div");
+    div.className = "note";
+    div.setAttribute("data-note-id", n.id);
+    div.innerHTML = '<span class="note-text">' + esc(n.text) + '</span>'
+      + '<span class="note-meta">' + fmtDate(n.created_at) + '</span>'
+      + '<span class="note-actions">'
+      + '<button data-action="edit-note" title="edit">edit</button>'
+      + '<button data-action="delete-note" title="delete">del</button>'
+      + '</span>';
+    container.appendChild(div);
+  }
+}
+
+function renderNotesForMessage(container, convId, msgId) {
+  var notes = (notesCache[convId] || []).filter(function(n) { return n.message_id === msgId; });
+  appendNoteCards(container, notes);
+}
+
+function renderConversationNotes(container, convId) {
+  var notes = (notesCache[convId] || []).filter(function(n) { return n.target_kind === "conversation"; });
+  appendNoteCards(container, notes);
+}
+
+/** Build an add-note button markup. IDs go through escAttr so they cannot
+  * break out of the attribute even when they contain quotes/backslashes.
+  * The click is dispatched via delegated listener (see wireNoteDelegation). */
+function addNoteBtn(targetKind, convId, msgId) {
+  var attrs = 'class="add-note-btn" data-action="add-note"'
+    + ' data-target-kind="' + escAttr(targetKind) + '"'
+    + ' data-conv-id="' + escAttr(convId || "") + '"'
+    + (msgId ? ' data-msg-id="' + escAttr(msgId) + '"' : "")
+    + ' title="add note"';
+  return '<button ' + attrs + '>&#9998;</button>';
+}
+
+/** Delegated listener: any click on a .add-note-btn reads data-* attrs and
+  * calls openNoteComposer. Reads from DOM attributes, so no string interpolation
+  * of user-controlled values into executable code. Wired once at startup. */
+var noteDelegationWired = false;
+function wireNoteDelegation() {
+  if (noteDelegationWired) return;
+  noteDelegationWired = true;
+  document.addEventListener("click", function(ev) {
+    var addBtn = ev.target.closest(".add-note-btn[data-action=\"add-note\"]");
+    if (addBtn) {
+      openNoteComposer(
+        addBtn.getAttribute("data-target-kind"),
+        addBtn.getAttribute("data-conv-id"),
+        addBtn.getAttribute("data-msg-id") || null,
+        addBtn
+      );
+      return;
+    }
+    var editBtn = ev.target.closest("[data-action=\"edit-note\"]");
+    if (editBtn) {
+      var ec = editBtn.closest(".note");
+      if (ec) editNote(ec.getAttribute("data-note-id"), editBtn);
+      return;
+    }
+    var delBtn = ev.target.closest("[data-action=\"delete-note\"]");
+    if (delBtn) {
+      var dc = delBtn.closest(".note");
+      if (dc) deleteNoteUI(dc.getAttribute("data-note-id"), delBtn);
+      return;
+    }
+  });
+}
+
+function openNoteComposer(targetKind, convId, msgId, btn) {
+  var existing = btn.parentElement.querySelector(".note-composer");
+  if (existing) { existing.remove(); return; }
+  var composer = document.createElement("div");
+  composer.className = "note-composer";
+  var ta = document.createElement("textarea");
+  ta.placeholder = "Write a note...";
+  var saveBtn = document.createElement("button");
+  saveBtn.className = "btn btn-primary";
+  saveBtn.textContent = "Save";
+  saveBtn.onclick = function() {
+    var text = ta.value.trim();
+    if (!text) return;
+    saveNote(targetKind, convId, msgId, text);
+    composer.remove();
+    if (activeConvId) openConversation(activeConvId);
+  };
+  var cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.onclick = function() { composer.remove(); };
+  composer.appendChild(ta);
+  composer.appendChild(saveBtn);
+  composer.appendChild(cancelBtn);
+  btn.parentElement.appendChild(composer);
+  ta.focus();
+}
+
+/** Try a SQL statement; swallow errors from missing tables. FTS5 tables
+  * are stripped on HTML export (sql.js has no FTS5), so note writes
+  * must continue silently when notes_fts does not exist. */
+function tryExec(sql, params) {
+  try { db.run(sql, params || []); } catch (e) { /* tolerated */ }
+}
+
+function saveNote(targetKind, convId, msgId, text, noteId) {
+  var id = noteId || crypto.randomUUID();
+  var now = new Date().toISOString();
+  if (noteId) {
+    exec("UPDATE notes SET text = ?, updated_at = ? WHERE id = ?", [text, now, noteId]);
+    tryExec("DELETE FROM notes_fts WHERE note_id = ?", [noteId]);
+    tryExec("INSERT INTO notes_fts (note_id, conversation_id, message_id, text) VALUES (?, ?, ?, ?)",
+      [noteId, convId, msgId, text]);
+  } else {
+    exec("INSERT INTO notes (id, target_kind, conversation_id, message_id, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, targetKind, convId, msgId, text, now, now]);
+    tryExec("INSERT INTO notes_fts (note_id, conversation_id, message_id, text) VALUES (?, ?, ?, ?)",
+      [id, convId, msgId, text]);
+  }
+}
+
+function deleteNoteUI(noteId, btn) {
+  if (!confirm("Delete this note?")) return;
+  tryExec("DELETE FROM notes_fts WHERE note_id = ?", [noteId]);
+  exec("DELETE FROM notes WHERE id = ?", [noteId]);
+  var noteDiv = btn.closest(".note");
+  if (noteDiv) noteDiv.remove();
+}
+
+function editNote(noteId, btn) {
+  var noteDiv = btn.closest(".note");
+  var textSpan = noteDiv.querySelector(".note-text");
+  var currentText = textSpan.textContent;
+  var ta = document.createElement("textarea");
+  ta.className = "note-composer";
+  ta.style.width = "100%";
+  ta.value = currentText;
+  textSpan.replaceWith(ta);
+  ta.focus();
+  var actions = noteDiv.querySelector(".note-actions");
+  if (actions) actions.style.display = "none";
+  var meta = noteDiv.querySelector(".note-meta");
+  function finishEdit() {
+    var newText = ta.value.trim();
+    if (newText && newText !== currentText) {
+      /* Single SELECT — two separate queries race if the note is deleted
+         mid-edit, and passing null for target_kind caused saveNote to
+         silently reclassify the note in the FTS reindex path. */
+      var rows = query(
+        "SELECT target_kind, conversation_id, message_id FROM notes WHERE id = ?",
+        [noteId]
+      );
+      if (rows.length) {
+        var r = rows[0];
+        saveNote(r.target_kind, r.conversation_id, r.message_id, newText, noteId);
+      }
+    }
+    var span = document.createElement("span");
+    span.className = "note-text";
+    span.textContent = newText || currentText;
+    ta.replaceWith(span);
+    if (actions) actions.style.display = "";
+  }
+  ta.addEventListener("blur", finishEdit);
+}
+
+/* -- chat constants -------------------------------------------------- */
+var SCHEMA_DDL = 'SCHEMA';
+
+/* Librarian system prompt: the model is the reader\u2019s research assistant
+   over THEIR OWN personal archive of LLM conversations. Kept intentionally
+   long and specific because the tool-use loop benefits from concrete
+   schema-aware examples; cuts down on SQL hallucination and half-queries. */
+var LIBRARIAN_SYSTEM_PROMPT = "You are the librarian of this person\u2019s llm-memex \u2014 their personal archive of LLM conversations imported from ChatGPT (openai), Claude (anthropic), Gemini, and Claude Code. The archive spans thousands of conversations across years. You are not a fresh assistant; you are the intelligence layer over their own past thinking.\n\nCONTEXT: This database is loaded via sql.js (WebAssembly SQLite). FTS5 virtual tables are NOT available \u2014 use LIKE with % wildcards for text search, never MATCH. All writes from the SPA go to an in-memory copy; your answers are pure reads.\n\nDATABASE SCHEMA:\n" + SCHEMA_DDL + "\n\nYOU HAVE AN execute_sql TOOL. Use it to answer. Do not invent titles, dates, counts, or quotes \u2014 query first. Quote and cite what you find.\n\nQUERY GUIDELINES:\n- ALWAYS LIMIT. Default LIMIT 20 for browse queries, LIMIT 5 for exemplars, LIMIT 1 for lookups.\n- Use LIKE '%term%' for text search on conversations.title and messages.content. messages.content is a JSON array of content blocks; LIKE on it works because the text is embedded in the JSON.\n- Reference conversations by URI: llm-memex://conversation/{id}. When you cite, include title + updated_at + a message_count as context.\n- When a question spans content, search both titles and message bodies \u2014 sometimes the substantive conversation was never titled well.\n- Use EXISTS subqueries or JOINs as appropriate; prefer subqueries for \"has a message containing X\" and JOINs when you need to surface the matching message itself.\n- The notes table is the user\u2019s own marginalia \u2014 a high-signal layer authored BY the user ABOUT conversations/messages. Check it first for thematic or retrospective questions.\n- Source distribution: openai, anthropic, claude_code. If the user asks about \"my Claude Code sessions\", filter on source.\n\nEXAMPLE PATTERNS:\nUser: \"what have I been working on lately?\"\n  execute_sql(\"SELECT id, title, source, message_count, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 15\")\nUser: \"find conversations about mesa-optimization\"\n  execute_sql(\"SELECT id, title, source, updated_at, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE '%mesa-optimization%') AS hits FROM conversations c WHERE title LIKE '%mesa%' OR EXISTS (SELECT 1 FROM messages m2 WHERE m2.conversation_id=c.id AND m2.content LIKE '%mesa-optimization%') ORDER BY hits DESC LIMIT 15\")\nUser: \"how many conversations per provider?\"\n  execute_sql(\"SELECT source, COUNT(*) AS n FROM conversations GROUP BY source ORDER BY n DESC\")\nUser: \"what did I annotate this year?\"\n  execute_sql(\"SELECT n.text, n.created_at, c.title FROM notes n JOIN conversations c ON c.id=n.conversation_id WHERE n.created_at >= '2026-01-01' ORDER BY n.created_at DESC LIMIT 30\")\nUser: \"summarize the conversation titled X\"\n  1. execute_sql(\"SELECT id FROM conversations WHERE title LIKE '%X%' LIMIT 1\")\n  2. execute_sql(\"SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at LIMIT 80\", [id])\n  Then synthesize from the retrieved messages.\n\nBEST PRACTICES:\n- Be concise. Markdown is welcome.\n- For find-questions, return a ranked list with title + URI + 1-line snippet of the matching text.\n- For summarize-questions, retrieve messages and synthesize; do not just list titles.\n- If a query returns nothing, say what you searched and suggest alternative wording or nearby topics.\n- Respect the user\u2019s privacy: you are reading their own thoughts. Don\u2019t judge, don\u2019t paraphrase harshly, don\u2019t flag things as \"concerning\". Reflect, don\u2019t supervise.";
+
+/* Conversation-resume system prompt: appended to whatever the user set in
+   Settings. When the user continues a specific imported conversation, the
+   model should know this is archival continuation \u2014 sometimes years later. */
+var CONVERSATION_SYSTEM_PROMPT = "You are continuing a conversation from the user\u2019s llm-memex \u2014 their personal archive of past LLM conversations (ChatGPT, Claude, Gemini, Claude Code). This is not a fresh session: the user may be picking up a thread from months or years ago with new context, so treat it as a real continuation rather than starting over. Respect the original tone of the conversation. If the user asks about the archive itself or wants to browse other conversations, point them to the librarian chat (\ud83d\udcac icon in the top bar) or the home view (click memex) \u2014 you are in conversation-replay mode, not browse mode.";
+
+var EXECUTE_SQL_TOOL = {
+  name: "execute_sql",
+  description: "Run a read-only SQL query against the conversation database. Returns results as a JSON array of objects. Use this to search conversations, count records, and find specific messages. Always use LIKE for text search (FTS5/MATCH is not available).",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "SQL SELECT query to execute"
+      }
+    },
+    required: ["query"]
+  }
+};
+
+var librarianMessages = [];
+var MAX_TOOL_ROUNDS = 5;
+
+/* -- chat dispatch --------------------------------------------------- */
+
+/** Dispatch to librarian or resume-conversation based on chatMode. */
+function isChatConfigured() {
+  return !!(localStorage.getItem("llm_memex_endpoint") || "").trim();
+}
+
+/** Update welcome screen and input placeholder based on chat config + mode. */
+function refreshChatUiState() {
+  var chatOn = isChatConfigured();
+  var input = document.getElementById("message-input");
+  var inputArea = document.getElementById("input-area");
+  if (input && inputArea) {
+    if (chatMode === "conversation") {
+      inputArea.classList.remove("hidden");
+      input.placeholder = chatOn ? "continue conversation or add a note\u2026" : "add a note to this conversation\u2026";
+      input.disabled = false;
+    } else if (chatMode === "librarian") {
+      inputArea.classList.remove("hidden");
+      input.placeholder = chatOn ? "ask about your archive\u2026" : "chat disabled \u2014 open settings \u2699 to enable";
+      input.disabled = !chatOn;
+    } else {
+      /* home, marginalia, search: no inline input */
+      inputArea.classList.add("hidden");
+    }
+  }
+}
+
+/** Input dispatch by mode:
+  * - librarian chat: send the question to askLibrarian
+  * - conversation with chat off: save as marginalia note
+  * - conversation with chat on: resume via LLM */
+function sendMessage() {
+  var input = document.getElementById("message-input");
+  var text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  if (chatMode === "librarian") {
+    if (!isChatConfigured()) {
+      appendSystemMessage(
+        document.getElementById("librarian-log") || document.getElementById("messages"),
+        "Chat is disabled. Open Settings (\u2699) to add an API endpoint and key."
+      );
+      return;
+    }
+    askLibrarian(text);
+    return;
+  }
+  if (!activeConvId) return;
+  if (!isChatConfigured()) {
+    saveNote("conversation", activeConvId, null, text, null);
+    var header = document.querySelector("#messages .conv-header");
+    if (header) {
+      var existing = header.querySelectorAll(".note");
+      for (var i = 0; i < existing.length; i++) existing[i].remove();
+      renderConversationNotes(header, activeConvId);
+    }
+    return;
+  }
+  resumeConversation(text);
+}
+
+/* -- librarian ------------------------------------------------------- */
+
+/** Entry point for librarian mode. Renders into #librarian-log when
+  * present (chat view); otherwise appends to #messages for backward compat. */
+async function askLibrarian(text) {
+  if (!db) return;
+  var sendBtn = document.getElementById("send-btn");
+  var input = document.getElementById("message-input");
+  var container = document.getElementById("librarian-log") || document.getElementById("messages");
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+
+  /* Add user message */
+  librarianMessages.push({ role: "user", content: text });
+  appendChatMessage(container, "user", text);
+
+  /* Create assistant message div */
+  var assistDiv = appendChatMessage(container, "assistant", "");
+  var assistContent = assistDiv.querySelector(".message-content");
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+
+  try {
+    await runAgenticLoop(assistContent, container);
+  } catch (err) {
+    appendSystemMessage(container, "Could not reach the server. Check your connection.");
+    console.error("askLibrarian error:", err);
+  }
+
+  sendBtn.disabled = false;
+  input.disabled = false;
+  input.focus();
+}
+
+/**
+ * Agentic loop: stream first response, then handle tool calls.
+ */
+async function runAgenticLoop(assistContent, container) {
+  var endpoint = localStorage.getItem("llm_memex_endpoint") || "";
+  if (!endpoint) {
+    throw new Error("Chat is disabled. Open Settings (\u2699) to configure an API endpoint and key.");
+  }
+  var apiKey = localStorage.getItem("llm_memex_api_key") || "";
+  var model = localStorage.getItem("llm_memex_model") || "claude-sonnet-4-6";
+
+  var headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-dangerous-direct-browser-access"] = "true";
+  }
+
+  /* First round: streaming */
+  var body = {
+    model: model,
+    max_tokens: 4096,
+    stream: true,
+    system: LIBRARIAN_SYSTEM_PROMPT,
+    messages: librarianMessages,
+    tools: [EXECUTE_SQL_TOOL]
+  };
+
+  var response = await fetch(endpoint, {
+    method: "POST",
+    headers: headers,
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    var errText = await response.text();
+    appendSystemMessage(container, "API error " + response.status + ": " + errText);
+    return;
+  }
+
+  var result = await parseStreamResponse(response, assistContent, container);
+
+  /* Handle tool use rounds */
+  var rounds = 0;
+  while (result && result.type === "tool_use" && rounds < MAX_TOOL_ROUNDS) {
+    rounds++;
+
+    /* Add assistant message with tool_use to history */
+    librarianMessages.push({ role: "assistant", content: result.contentBlocks });
+
+    /* Execute the tool */
+    var toolResult = executeTool(result.toolUse);
+
+    /* Add tool_result to history */
+    librarianMessages.push({
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: result.toolUse.id,
+        content: toolResult
+      }]
+    });
+
+    /* Create new assistant div for next response */
+    var nextDiv = appendChatMessage(container, "assistant", "");
+    assistContent = nextDiv.querySelector(".message-content");
+    container.scrollTop = container.scrollHeight;
+
+    /* Decide if this is the final forced round */
+    var nextBody = {
+      model: model,
+      max_tokens: 4096,
+      stream: true,
+      system: LIBRARIAN_SYSTEM_PROMPT,
+      messages: librarianMessages
+    };
+    if (rounds < MAX_TOOL_ROUNDS) {
+      nextBody.tools = [EXECUTE_SQL_TOOL];
+    }
+
+    var nextResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify(nextBody)
+    });
+
+    if (!nextResponse.ok) {
+      var errText2 = await nextResponse.text();
+      appendSystemMessage(container, "API error " + nextResponse.status + ": " + errText2);
+      return;
+    }
+
+    result = await parseStreamResponse(nextResponse, assistContent, container);
+  }
+
+  /* Add final text to history */
+  if (result && result.type === "text" && result.text) {
+    librarianMessages.push({ role: "assistant", content: result.text });
+  } else if (result && result.contentBlocks) {
+    librarianMessages.push({ role: "assistant", content: result.contentBlocks });
+  }
+}
+
+/**
+ * Parse an SSE stream response. Renders text progressively.
+ * Returns {type: "text", text, contentBlocks} or {type: "tool_use", toolUse, contentBlocks}.
+ */
+async function parseStreamResponse(response, assistContent, container) {
+  var reader = response.body.getReader();
+  var decoder = new TextDecoder();
+  var buffer = "";
+  var accumulated = "";
+  var toolUse = null;
+  var toolJsonStr = "";
+  var contentBlocks = [];
+  var currentBlockIndex = -1;
+
+  while (true) {
+    var chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+
+    var lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (var k = 0; k < lines.length; k++) {
+      var line = lines[k].trim();
+      if (!line.startsWith("data: ")) continue;
+      var data = line.substring(6);
+      if (data === "[DONE]") continue;
+      try {
+        var evt = JSON.parse(data);
+        if (evt.type === "content_block_start") {
+          currentBlockIndex = evt.index;
+          if (evt.content_block && evt.content_block.type === "tool_use") {
+            toolUse = { id: evt.content_block.id, name: evt.content_block.name, input: {} };
+            toolJsonStr = "";
+          }
+        } else if (evt.type === "content_block_delta" && evt.delta) {
+          if (evt.delta.type === "text_delta") {
+            accumulated += evt.delta.text;
+            assistContent.innerHTML = renderMarkdown(accumulated);
+            container.scrollTop = container.scrollHeight;
+          } else if (evt.delta.type === "input_json_delta") {
+            toolJsonStr += evt.delta.partial_json;
+          }
+        } else if (evt.type === "content_block_stop") {
+          if (toolUse && toolJsonStr) {
+            try { toolUse.input = JSON.parse(toolJsonStr); } catch (e) {}
+          }
+          if (toolUse) {
+            contentBlocks.push({ type: "tool_use", id: toolUse.id, name: toolUse.name, input: toolUse.input });
+          } else if (accumulated) {
+            contentBlocks.push({ type: "text", text: accumulated });
+          }
+        }
+      } catch (e) {
+        /* Skip unparseable SSE lines */
+      }
+    }
+  }
+
+  if (toolUse) {
+    /* Show a subtle indicator that a query is running */
+    if (accumulated) {
+      assistContent.innerHTML = renderMarkdown(accumulated + "\n\n*Running query...*");
+    } else {
+      assistContent.innerHTML = renderMarkdown("*Running query...*");
+    }
+    return { type: "tool_use", toolUse: toolUse, contentBlocks: contentBlocks };
+  }
+  return { type: "text", text: accumulated, contentBlocks: contentBlocks };
+}
+
+/**
+ * Execute a tool call. Only accepts execute_sql.
+ * Returns JSON string result.
+ */
+function executeTool(toolUse) {
+  if (toolUse.name !== "execute_sql") {
+    return JSON.stringify({ error: "Unknown tool: " + toolUse.name });
+  }
+  var sql = (toolUse.input.query || "").trim();
+  /* The real guard is two-fold: the first-word SELECT/EXPLAIN check
+     below, plus query() preparing and stepping only the FIRST statement
+     (so a "SELECT ...; DELETE ..." smuggle never executes the write).
+     WITH is intentionally not first-word-allowed since SQLite permits
+     data-modifying CTEs. The getRowsModified delta further down is a
+     best-effort secondary signal ONLY: it is not a reliable write
+     detector across sql.js builds and must not be relied upon. */
+  var firstWord = sql.split(/\s/)[0].toUpperCase();
+  if (firstWord !== "SELECT" && firstWord !== "EXPLAIN") {
+    return JSON.stringify({ error: "Only SELECT/EXPLAIN queries are allowed. Got: " + firstWord });
+  }
+  try {
+    var beforeChanges = db.getRowsModified ? db.getRowsModified() : 0;
+    var rows = query(sql);
+    var afterChanges = db.getRowsModified ? db.getRowsModified() : 0;
+    if (afterChanges !== beforeChanges) {
+      return JSON.stringify({ error: "Query modified rows; librarian chat is read-only. Blocked." });
+    }
+    if (rows.length > 50) {
+      rows = rows.slice(0, 50);
+      rows.push({ _truncated: true, _message: "Results truncated to 50 rows" });
+    }
+    return JSON.stringify(rows);
+  } catch (e) {
+    return JSON.stringify({ error: e.message });
+  }
+}
+
+/**
+ * Create and append a chat message div.
+ * @returns {HTMLElement} The created div
+ */
+function appendChatMessage(container, role, text) {
+  var div = document.createElement("div");
+  div.className = "message " + role;
+  var roleDiv = document.createElement("div");
+  roleDiv.className = "message-role";
+  roleDiv.textContent = role;
+  div.appendChild(roleDiv);
+  var contentDiv = document.createElement("div");
+  contentDiv.className = "message-content";
+  if (text) contentDiv.innerHTML = renderMarkdown(text);
+  div.appendChild(contentDiv);
+  container.appendChild(div);
+  return div;
+}
+
+/** Append a system/error message. */
+function appendSystemMessage(container, text) {
+  var div = document.createElement("div");
+  div.className = "message system";
+  div.innerHTML = '<div class="message-role">system</div><div class="message-content" style="color: var(--danger);">' + esc(text) + "</div>";
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+/* -- resume conversation chat ---------------------------------------- */
+
+/**
+ * Resume a conversation via Anthropic API (existing per-conversation chat).
+ */
+/** Build the HTTP request for a chat completion, branching on provider.
+  * Anthropic: /v1/messages  with x-api-key + anthropic-version headers,
+  *   body uses separate `system` field and messages array.
+  * OpenAI-compatible: /v1/chat/completions with Bearer auth, body has
+  *   system prompt prepended as role:"system" in the messages array. */
+function buildChatRequest(provider, apiKey, model, systemPrompt, messages) {
+  var headers = { "Content-Type": "application/json" };
+  if (provider === "openai") {
+    if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+    var msgs = systemPrompt
+      ? [{ role: "system", content: systemPrompt }].concat(messages)
+      : messages;
+    return {
+      headers: headers,
+      body: { model: model, messages: msgs, max_tokens: 4096, stream: true }
+    };
+  }
+  /* default: anthropic */
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-dangerous-direct-browser-access"] = "true";
+  }
+  var body = { model: model, max_tokens: 4096, stream: true, messages: messages };
+  if (systemPrompt) body.system = systemPrompt;
+  return { headers: headers, body: body };
+}
+
+/** Extract text delta from a single SSE data line, branching on provider. */
+function extractDeltaText(provider, data) {
+  if (!data || data === "[DONE]") return "";
+  var evt;
+  try { evt = JSON.parse(data); } catch (e) { return ""; }
+  if (provider === "openai") {
+    if (evt.choices && evt.choices[0] && evt.choices[0].delta) {
+      return evt.choices[0].delta.content || "";
+    }
+    return "";
+  }
+  /* anthropic content_block_delta */
+  if (evt.type === "content_block_delta" && evt.delta && evt.delta.type === "text_delta") {
+    return evt.delta.text || "";
+  }
+  return "";
+}
+
+async function resumeConversation(userText) {
+  if (!db || !activeConvId) return;
+
+  var endpoint = localStorage.getItem("llm_memex_endpoint") || "";
+  if (!endpoint) {
+    appendSystemMessage(document.getElementById("messages"), "Chat is disabled. Open Settings (\u2699) to configure an API endpoint and key.");
+    return;
+  }
+  var apiKey = localStorage.getItem("llm_memex_api_key") || "";
+  var provider = localStorage.getItem("llm_memex_provider") || "anthropic";
+
+  /* Capture epoch + conv ID so we bail if user switches views mid-stream. */
+  var myEpoch = streamEpoch;
+  var streamConvId = activeConvId;
+
+  var sendBtn = document.getElementById("send-btn");
+  sendBtn.disabled = true;
+
+  var model = localStorage.getItem("llm_memex_model") || defaultModelFor(provider);
+  /* Compose: memex-aware default + user-set prompt (user extends, not replaces). */
+  var userPrompt = localStorage.getItem("llm_memex_system_prompt") || "";
+  var systemPrompt = userPrompt
+    ? CONVERSATION_SYSTEM_PROMPT + "\n\n" + userPrompt
+    : CONVERSATION_SYSTEM_PROMPT;
+
+  /* Build message history from DB */
+  var dbMessages = query(
+    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+    [activeConvId]
+  );
+  var history = [];
+  for (var i = 0; i < dbMessages.length; i++) {
+    var msg = dbMessages[i];
+    var text = "";
+    try {
+      var parsed = JSON.parse(msg.content);
+      if (Array.isArray(parsed)) {
+        for (var j = 0; j < parsed.length; j++) {
+          if (parsed[j].type === "text" && parsed[j].text) text += parsed[j].text;
+        }
+      } else if (typeof parsed === "string") {
+        text = parsed;
+      }
+    } catch (e) {
+      text = String(msg.content || "");
+    }
+    if (text && (msg.role === "user" || msg.role === "assistant")) {
+      history.push({ role: msg.role, content: text });
+    }
+  }
+
+  /* Add user's new message */
+  history.push({ role: "user", content: userText });
+
+  /* Get the last message ID for parent_id */
+  var lastMsgRows = query(
+    "SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+    [activeConvId]
+  );
+  var parentId = lastMsgRows.length > 0 ? lastMsgRows[0].id : null;
+
+  /* INSERT user message into DB (streamConvId captures the conversation
+     at the moment the user hit send, so a mid-reply navigate away does
+     not mix messages between conversations). */
+  var userMsgId = crypto.randomUUID();
+  var now = new Date().toISOString();
+  var userContent = JSON.stringify([{ type: "text", text: userText }]);
+  exec(
+    "INSERT INTO messages (conversation_id, id, role, content, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [streamConvId, userMsgId, "user", userContent, parentId, now]
+  );
+  tryExec(
+    "INSERT INTO messages_fts (conversation_id, message_id, text) VALUES (?, ?, ?)",
+    [streamConvId, userMsgId, userText]
+  );
+
+  /* Render user message in the conversation view */
+  var container = document.getElementById("messages");
+  var userDiv = document.createElement("div");
+  userDiv.className = "message user";
+  userDiv.innerHTML = '<div class="message-role">user</div><div class="message-content">' + renderMarkdown(userText) + "</div>";
+  container.appendChild(userDiv);
+
+  /* Create assistant message div for streaming */
+  var assistDiv = document.createElement("div");
+  assistDiv.className = "message assistant";
+  assistDiv.innerHTML = '<div class="message-role">assistant</div><div class="message-content"></div>';
+  container.appendChild(assistDiv);
+  var assistContent = assistDiv.querySelector(".message-content");
+  container.scrollTop = container.scrollHeight;
+
+  var req = buildChatRequest(provider, apiKey, model, systemPrompt, history);
+
+  var accumulated = "";
+  try {
+    var response = await fetch(endpoint, {
+      method: "POST",
+      headers: req.headers,
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      var errText = await response.text();
+      throw new Error("API error " + response.status + ": " + errText);
+    }
+
+    /* Read SSE stream (both providers use text/event-stream with data: lines) */
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var sseBuffer = "";
+
+    while (true) {
+      /* Abandon if the view changed (user clicked another conv, went home, etc.) */
+      if (myEpoch !== streamEpoch) { try { reader.cancel(); } catch(e) {} break; }
+      var result = await reader.read();
+      if (result.done) break;
+      sseBuffer += decoder.decode(result.value, { stream: true });
+
+      var lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop();
+
+      for (var k = 0; k < lines.length; k++) {
+        if (myEpoch !== streamEpoch) break;
+        var line = lines[k].trim();
+        if (!line.startsWith("data: ")) continue;
+        var data = line.substring(6);
+        var delta = extractDeltaText(provider, data);
+        if (delta) {
+          accumulated += delta;
+          assistContent.innerHTML = renderMarkdown(accumulated);
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+    }
+  } catch (err) {
+    if (!accumulated) {
+      assistContent.innerHTML = '<span style="color: var(--danger);">Error: ' + esc(err.message) + "</span>";
+    }
+    console.error("resumeConversation error:", err);
+  }
+
+  /* INSERT assistant message into DB — but only if the stream completed
+     against the conversation we started with. If the user navigated
+     away, drop the partial response rather than writing it into the
+     wrong conversation or a now-stale active one. */
+  if (accumulated && myEpoch === streamEpoch) {
+    var assistMsgId = crypto.randomUUID();
+    var assistNow = new Date().toISOString();
+    var assistContentJson = JSON.stringify([{ type: "text", text: accumulated }]);
+    exec(
+      "INSERT INTO messages (conversation_id, id, role, content, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [streamConvId, assistMsgId, "assistant", assistContentJson, userMsgId, assistNow]
+    );
+    /* Keep messages_fts in sync when it exists (source DB); silently
+       no-op when it does not (exported SPA, FTS5 stripped). */
+    tryExec(
+      "INSERT INTO messages_fts (conversation_id, message_id, text) VALUES (?, ?, ?)",
+      [streamConvId, assistMsgId, accumulated]
+    );
+
+    exec(
+      "UPDATE conversations SET message_count = (SELECT count(*) FROM messages WHERE conversation_id = ?), updated_at = ? WHERE id = ?",
+      [streamConvId, assistNow, streamConvId]
+    );
+  }
+
+  sendBtn.disabled = false;
+}
+
+/** Download the current database as a .db file. */
+function downloadDb() {
+  if (!db) return;
+  var data = db.export();
+  var blob = new Blob([data], { type: "application/octet-stream" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "conversations.db";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Extract plain text from a message's content JSON. Mirrors the Python
+  * exporter's Message.get_text(): concat text blocks, ignore others. */
+function _extractMsgText(contentJson) {
+  try {
+    var parsed = JSON.parse(contentJson);
+    if (Array.isArray(parsed)) {
+      var parts = [];
+      for (var i = 0; i < parsed.length; i++) {
+        if (parsed[i] && parsed[i].type === "text" && parsed[i].text) {
+          parts.push(parsed[i].text);
+        }
+      }
+      return parts.join("\n");
+    }
+    if (typeof parsed === "string") return parsed;
+    return "";
+  } catch (e) {
+    return String(contentJson || "");
+  }
+}
+
+/** Build one arkiv record per text-bearing message. Record shape matches
+  * llm_memex/exporters/arkiv_export.py exactly so the Python importer
+  * accepts the output without any special-case code. */
+function _buildArkivRecords() {
+  var convs = query(
+    "SELECT id, title, source, model, tags_joined FROM ("
+    + " SELECT c.id, c.title, c.source, c.model, "
+    + " (SELECT group_concat(tag, '\u0001') FROM tags t WHERE t.conversation_id = c.id) AS tags_joined"
+    + " FROM conversations c"
+    + ")"
+  );
+  var convById = {};
+  for (var i = 0; i < convs.length; i++) {
+    var c = convs[i];
+    convById[c.id] = {
+      title: c.title, source: c.source, model: c.model,
+      tags: c.tags_joined ? c.tags_joined.split("\u0001") : []
+    };
+  }
+  /* Message-level notes grouped by message_id for inline attachment. */
+  var noteRows = query(
+    "SELECT id, message_id, text FROM notes WHERE target_kind = 'message' AND message_id IS NOT NULL"
+  );
+  var notesByMsg = {};
+  for (var ni = 0; ni < noteRows.length; ni++) {
+    var nr = noteRows[ni];
+    if (!notesByMsg[nr.message_id]) notesByMsg[nr.message_id] = [];
+    notesByMsg[nr.message_id].push({ id: nr.id, text: nr.text });
+  }
+  var msgs = query(
+    "SELECT conversation_id, id, role, content, model, created_at FROM messages ORDER BY conversation_id, created_at"
+  );
+  var convCreated = {};
+  var convMinRow = query(
+    "SELECT id, created_at FROM conversations"
+  );
+  for (var cmi = 0; cmi < convMinRow.length; cmi++) convCreated[convMinRow[cmi].id] = convMinRow[cmi].created_at;
+  var records = [];
+  for (var m = 0; m < msgs.length; m++) {
+    var msg = msgs[m];
+    var text = _extractMsgText(msg.content);
+    if (!text) continue;
+    var conv = convById[msg.conversation_id] || {};
+    var timestamp = msg.created_at || convCreated[msg.conversation_id] || new Date().toISOString();
+    var meta = { conversation_id: msg.conversation_id, role: msg.role };
+    if (conv.title) meta.conversation_title = conv.title;
+    if (conv.source) meta.source = conv.source;
+    if (msg.model) meta.model = msg.model;
+    else if (conv.model) meta.model = conv.model;
+    meta.message_id = msg.id;
+    if (conv.tags && conv.tags.length) meta.tags = conv.tags;
+    var notes = notesByMsg[msg.id];
+    if (notes && notes.length) meta.notes = notes;
+    records.push({
+      mimetype: "text/plain",
+      content: text,
+      timestamp: timestamp,
+      metadata: meta
+    });
+  }
+  /* Conversation-level notes: the default annotation path when chat
+     is off (the message input box saves a conversation note). Emit
+     one carrier record per conversation so they round-trip; mirrors
+     arkiv_export._build_records on the Python side. */
+  var convNoteRows = query(
+    "SELECT id, conversation_id, text FROM notes WHERE target_kind = 'conversation'"
+  );
+  var convNotesById = {};
+  for (var cni = 0; cni < convNoteRows.length; cni++) {
+    var cnr = convNoteRows[cni];
+    if (!cnr.id || !cnr.text) continue;
+    if (!convNotesById[cnr.conversation_id]) convNotesById[cnr.conversation_id] = [];
+    convNotesById[cnr.conversation_id].push({ id: cnr.id, text: cnr.text });
+  }
+  for (var cid in convNotesById) {
+    if (!convNotesById.hasOwnProperty(cid)) continue;
+    var cconv = convById[cid] || {};
+    var cmeta = { conversation_id: cid, target_kind: "conversation", conversation_notes: convNotesById[cid] };
+    if (cconv.title) cmeta.conversation_title = cconv.title;
+    records.push({
+      mimetype: "text/plain",
+      content: (cconv.title || cid),
+      timestamp: convCreated[cid] || new Date().toISOString(),
+      metadata: cmeta
+    });
+  }
+  return records;
+}
+
+/** Gzip-compress a Uint8Array via the native CompressionStream API.
+  * Returns a Promise<Uint8Array>. Supported in every evergreen browser
+  * since 2020; no library dependency. */
+async function _gzipBytes(bytes) {
+  var cs = new CompressionStream("gzip");
+  var stream = new Blob([bytes]).stream().pipeThrough(cs);
+  var ab = await new Response(stream).arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+/** Export all conversations as arkiv JSONL, gzipped, and trigger a
+  * browser download. The resulting .jsonl.gz is consumable by
+  * `llm-memex import ... --format arkiv` for the round-trip. */
+async function downloadArkiv() {
+  if (!db) return;
+  var btn = document.getElementById("download-arkiv-btn");
+  var orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "packing\u2026"; }
+  try {
+    var records = _buildArkivRecords();
+    var lines = [];
+    for (var i = 0; i < records.length; i++) {
+      lines.push(JSON.stringify(records[i]));
+    }
+    var jsonl = lines.join("\n") + "\n";
+    var encoder = new TextEncoder();
+    var bytes = encoder.encode(jsonl);
+    var gz = await _gzipBytes(bytes);
+    var blob = new Blob([gz], { type: "application/gzip" });
+    var url = URL.createObjectURL(blob);
+    var today = new Date().toISOString().slice(0, 10);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "llm-memex-" + today + ".jsonl.gz";
+    a.click();
+    URL.revokeObjectURL(url);
+    if (btn) btn.textContent = "downloaded \u2713";
+    setTimeout(function() { if (btn) { btn.textContent = orig; btn.disabled = false; } }, 1500);
+  } catch (err) {
+    console.error("downloadArkiv error:", err);
+    if (btn) { btn.textContent = "failed: " + err.message; btn.disabled = false; }
+  }
+}
+
+/** Default model when the user has not configured one, keyed by provider. */
+function defaultModelFor(provider) {
+  return provider === "openai" ? "gpt-4o-mini" : "claude-sonnet-4-6";
+}
+
+/** Default endpoint placeholder hint per provider (user still must paste). */
+function defaultEndpointHintFor(provider) {
+  return provider === "openai"
+    ? "https://api.openai.com/v1/chat/completions"
+    : "https://api.anthropic.com/v1/messages";
+}
+
+var settingsWired = false;
+function wireSettingsOnce() {
+  if (settingsWired) return;
+  settingsWired = true;
+  var provSel = document.getElementById("setting-provider");
+  if (!provSel) return;
+  provSel.addEventListener("change", function() {
+    var p = provSel.value;
+    document.getElementById("setting-endpoint").placeholder = defaultEndpointHintFor(p);
+    document.getElementById("setting-api-key").placeholder = p === "openai" ? "sk-\u2026" : "sk-ant-\u2026";
+    document.getElementById("setting-model").placeholder = defaultModelFor(p);
+  });
+}
+
+/** Load settings from localStorage into form fields. */
+function loadSettings() {
+  wireSettingsOnce();
+  var provider = localStorage.getItem("llm_memex_provider") || "anthropic";
+  var endpoint = localStorage.getItem("llm_memex_endpoint") || "";
+  var apiKey = localStorage.getItem("llm_memex_api_key") || "";
+  var model = localStorage.getItem("llm_memex_model") || "";
+  var systemPrompt = localStorage.getItem("llm_memex_system_prompt") || "";
+  document.getElementById("setting-provider").value = provider;
+  var endpointInput = document.getElementById("setting-endpoint");
+  endpointInput.value = endpoint;
+  endpointInput.placeholder = defaultEndpointHintFor(provider);
+  var apiKeyInput = document.getElementById("setting-api-key");
+  apiKeyInput.value = apiKey;
+  apiKeyInput.placeholder = provider === "openai" ? "sk-\u2026" : "sk-ant-\u2026";
+  var modelInput = document.getElementById("setting-model");
+  modelInput.value = model;
+  modelInput.placeholder = defaultModelFor(provider);
+  document.getElementById("setting-system-prompt").value = systemPrompt;
+}
+
+/** Save settings from form fields to localStorage. */
+function saveSettings() {
+  var provider = document.getElementById("setting-provider").value;
+  if (provider !== "anthropic" && provider !== "openai") provider = "anthropic";
+  var endpoint = document.getElementById("setting-endpoint").value.trim();
+  var apiKey = document.getElementById("setting-api-key").value.trim();
+  var model = document.getElementById("setting-model").value.trim();
+  var systemPrompt = document.getElementById("setting-system-prompt").value.trim();
+  localStorage.setItem("llm_memex_provider", provider);
+  localStorage.setItem("llm_memex_endpoint", endpoint);
+  localStorage.setItem("llm_memex_api_key", apiKey);
+  localStorage.setItem("llm_memex_model", model);
+  localStorage.setItem("llm_memex_system_prompt", systemPrompt);
+  toggleSettings();
+  refreshChatUiState();
+}
+
+/** Toggle the settings overlay visibility. */
+function toggleSettings() {
+  var overlay = document.getElementById("settings-overlay");
+  overlay.classList.toggle("visible");
+}
+
+/* -- theme ----------------------------------------------------------- */
+function initTheme() {
+  var saved = localStorage.getItem("llm_memex_theme");
+  var theme;
+  if (saved === "light" || saved === "dark") {
+    theme = saved;
+  } else {
+    theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  document.documentElement.setAttribute("data-theme", theme);
+  updateThemeIcon(theme);
+}
+
+function toggleTheme() {
+  var current = document.documentElement.getAttribute("data-theme") || "dark";
+  var next = current === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("llm_memex_theme", next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  var btn = document.getElementById("theme-toggle");
+  if (btn) btn.textContent = theme === "dark" ? "\u263E" : "\u2600";
+}
+
+/* Init theme immediately (before DB loads) */
+initTheme();
+
+/* -- boot ------------------------------------------------------------ */
+initApp().catch(function(err) {
+  console.error("initApp failed:", err);
+  var loading = document.getElementById("loading");
+  if (loading) loading.textContent = "error: " + err.message;
+});
+</script>
+</body>
+</html>

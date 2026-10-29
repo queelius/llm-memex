@@ -4,10 +4,86 @@ The template references sql.js (Wasm) as sibling files (sql-wasm.js and
 sql-wasm.wasm) shipped alongside index.html by the exporter, for true
 self-containment with no CDN dependency. All CSS and JS are inlined
 into index.html.
+
+``get_template`` also takes viewer options for the longecho ``site/`` folder,
+which must open from ``file://`` (no ``fetch``): the wasm and the gzipped DB
+arrive as ``<script src>`` payloads (see ``_longecho_site``), media live
+under a different base, and remote media can be turned into plain links.
+With the default options the page is byte-identical to the ``--format html``
+output (guarded by a golden-file test), so every option-dependent piece of
+JS below is emitted only when ``_ViewerOptions.is_default`` is false.
 """
 
+from __future__ import annotations
 
-def get_template(schema_ddl: str = "") -> str:
+import json
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class _ViewerOptions:
+    """Validated viewer options; the defaults are the ``--format html`` page."""
+
+    media_base: str = "assets/"
+    strict_network: bool = False
+    db_chunks: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.media_base, str) or not self.media_base.endswith("/"):
+            raise ValueError(f"media_base must be a path ending in '/', got {self.media_base!r}")
+        if not isinstance(self.strict_network, bool):
+            raise TypeError(f"strict_network must be a bool, got {self.strict_network!r}")
+        if self.db_chunks is not None:
+            if isinstance(self.db_chunks, bool) or not isinstance(self.db_chunks, int):
+                raise TypeError(f"db_chunks must be an int or None, got {self.db_chunks!r}")
+            if self.db_chunks < 0:
+                raise ValueError(f"db_chunks must be >= 0, got {self.db_chunks}")
+
+    @property
+    def is_default(self) -> bool:
+        return self == _ViewerOptions()
+
+
+def _js_literal(value) -> str:
+    """A JSON value as a JS literal that cannot close the inline <script>."""
+    return json.dumps(value).replace("<", "\\u003c")
+
+
+# Directives the page always carries. script-src is intentionally NOT
+# restricted: the bundle opens offline via file://, where an opaque origin
+# would not match 'self', so the sibling sql-wasm.js, inline scripts, and wasm
+# would all be blocked. We instead lock down the vectors that touch no
+# resource the app loads: plugins, base-tag hijacking, framing, and form
+# submission.
+_CSP_BASE = ("object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'",
+             "form-action 'none'")
+# strict_network: images and media only from the page's own files or inline
+# data. 'self' may not match a file: page in Chrome, hence the explicit file:.
+_CSP_STRICT = ("img-src 'self' file: data: blob:", "media-src 'self' file: data: blob:")
+
+
+def _csp_meta(opts: _ViewerOptions) -> str:
+    directives = _CSP_BASE + (_CSP_STRICT if opts.strict_network else ())
+    return ('<meta http-equiv="Content-Security-Policy" '
+            'content="' + "; ".join(directives) + '">\n')
+
+
+def _head_scripts(opts: _ViewerOptions) -> str:
+    """Script tags that run before the inline app script."""
+    tags = '<script src="sql-wasm.js"></script>\n'
+    if opts.db_chunks is not None:
+        # Sets window.LLM_MEMEX_WASM_B64 so sql.js never fetches the wasm.
+        tags += '<script src="sql-wasm-binary.js"></script>\n'
+    return tags
+
+
+def get_template(
+    schema_ddl: str = "",
+    *,
+    media_base: str = "assets/",
+    strict_network: bool = False,
+    db_chunks: int | None = None,
+) -> str:
     """Return the complete HTML5 SPA document as a string.
 
     Assembles the page from composable parts: CSS variables, layout,
@@ -17,31 +93,38 @@ def get_template(schema_ddl: str = "") -> str:
     ----------
     schema_ddl : str
         Database schema DDL, embedded into the librarian chat system prompt.
+    media_base : str
+        Where the page finds media stored as ``assets/...`` in the DB; such
+        URLs are rewritten to ``media_base + rest``. Must end in ``/``.
+    strict_network : bool
+        Render remote (``http(s)``) media and markdown images as links instead
+        of loading them, and restrict ``img-src``/``media-src`` in the CSP.
+    db_chunks : int or None
+        ``None`` loads the DB with the fetch cascade (``?db=``,
+        ``conversations.db.gz``, ``conversations.db``, file picker).
+        ``n > 0`` loads ``db/000.js`` ... ``db/<n-1>.js`` chunk scripts and the
+        wasm from ``sql-wasm-binary.js``, which works from ``file://``. ``0``
+        means the archive was too large to ship: the page opens the file
+        picker with a notice pointing at ``text/`` and ``data/``.
     """
+    opts = _ViewerOptions(media_base, strict_network, db_chunks)
     return (
         '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        # Defense-in-depth CSP. script-src is intentionally NOT restricted: this
-        # bundle is meant to open offline via file://, where an opaque origin
-        # would not match 'self', so the sibling sql-wasm.js, inline scripts,
-        # and wasm would all be blocked. We instead lock down the vectors that
-        # touch no resource the app loads: plugins, base-tag hijacking, framing,
-        # and form submission.
-        '<meta http-equiv="Content-Security-Policy" '
-        'content="object-src \'none\'; base-uri \'none\'; '
-        'frame-ancestors \'none\'; form-action \'none\'">\n'
-        '<title>memex</title>\n'
+        + _csp_meta(opts)
+        + '<title>memex</title>\n'
         '<style>\n'
         + _css_variables()
         + _css_layout()
         + _css_components()
         + '</style>\n</head>\n<body>\n'
         + _html_structure()
-        + '<script src="sql-wasm.js"></script>\n'
+        + _head_scripts(opts)
         + '<script>\n'
-        + _js_core()
-        + _js_ui()
+        + _js_viewer_options(opts)
+        + _js_core(opts)
+        + _js_ui(opts)
         + _js_notes()
         + _js_chat(schema_ddl)
         + _js_settings()
@@ -1249,7 +1332,226 @@ def _html_structure() -> str:
     )
 
 
-def _js_core() -> str:
+_JS_VIEWER_HELPERS = r"""
+var TOO_LARGE_NOTICE = "This archive is too large for the browser viewer. " +
+  "Read it from the text/ folder (Markdown) or the data/ folder (arkiv JSONL) " +
+  "next to this site/ folder, or open a .db file here.";
+
+/**
+ * Decode a base64 string to bytes.
+ * @param {string} b64
+ * @returns {Uint8Array}
+ */
+function base64ToBytes(b64) {
+  var bin = atob(b64);
+  var out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * sql.js config: the wasm bytes from sql-wasm-binary.js when that script
+ * ran (no fetch, so it works from file://), else the sibling wasm file.
+ */
+function sqlJsConfig() {
+  var b64 = window.LLM_MEMEX_WASM_B64;
+  if (typeof b64 === "string" && b64.length > 0) {
+    var bytes = base64ToBytes(b64);
+    window.LLM_MEMEX_WASM_B64 = null;
+    return { wasmBinary: bytes };
+  }
+  return { locateFile: function() { return WASM_URL; } };
+}
+
+/**
+ * A media path under MEDIA_BASE, or "" when the path is absolute or has a
+ * dot-dot segment (it would leave the media folder).
+ * @param {string} rest - Path relative to the media folder
+ * @returns {string}
+ */
+function localMediaUrl(rest) {
+  if (/^[\/\\]/.test(rest)) return "";
+  if (/(^|[\/\\])(\.|%2e){2}([\/\\]|$)/i.test(rest)) return "";
+  return MEDIA_BASE + rest;
+}
+
+/** Path of DB chunk script i, e.g. db/000.js (matches _longecho_site). */
+function dbChunkName(i) {
+  var s = String(i);
+  while (s.length < 3) s = "0" + s;
+  return "db/" + s + ".js";
+}
+
+/**
+ * Load db/000.js ... in order. Each script calls llmMemexDbChunk(i, b64).
+ * Resolves with the decoded slices in index order; rejects naming the first
+ * chunk file that failed to load or did not deliver its slice.
+ * @returns {Promise<Array<Uint8Array>>}
+ */
+function loadDbChunks() {
+  return new Promise(function(resolve, reject) {
+    var slices = new Array(DB_CHUNKS);
+    window.llmMemexDbChunk = function(index, b64) {
+      if (index === Math.floor(index) && index >= 0 && index < DB_CHUNKS && !slices[index]) {
+        slices[index] = base64ToBytes(b64);
+      }
+    };
+    function loadChunk(i) {
+      if (i >= DB_CHUNKS) {
+        window.llmMemexDbChunk = undefined;
+        resolve(slices);
+        return;
+      }
+      var name = dbChunkName(i);
+      var tag = document.createElement("script");
+      tag.src = name;
+      tag.onload = function() {
+        tag.parentNode.removeChild(tag);
+        if (!slices[i]) {
+          reject(new Error(name + " did not deliver chunk " + i));
+          return;
+        }
+        loadChunk(i + 1);
+      };
+      tag.onerror = function() {
+        reject(new Error("could not load " + name));
+      };
+      document.head.appendChild(tag);
+    }
+    loadChunk(0);
+  });
+}
+
+/**
+ * Open the file picker with a message above its controls.
+ * @param {Object} SQL - Initialized sql.js module
+ * @param {string} message
+ */
+function showPickerNotice(SQL, message) {
+  showFilePicker(SQL);
+  document.getElementById("loading").textContent = message;
+  var inner = document.getElementById("drop-zone-inner");
+  var note = document.getElementById("drop-zone-notice");
+  if (!note) {
+    note = document.createElement("p");
+    note.id = "drop-zone-notice";
+    note.style.fontSize = "var(--font-size-sm)";
+    note.style.maxWidth = "36em";
+    inner.insertBefore(note, inner.firstChild);
+  }
+  note.textContent = message;
+}
+
+/**
+ * Load the DB from chunk scripts, gunzip it, and open it. DB_CHUNKS = 0
+ * means the exporter left the DB out (too large): show the picker instead.
+ * @param {Object} SQL - Initialized sql.js module
+ */
+async function openChunkedDb(SQL) {
+  if (DB_CHUNKS === 0) {
+    showPickerNotice(SQL, TOO_LARGE_NOTICE);
+    return;
+  }
+  document.getElementById("loading").textContent = "loading archive…";
+  try {
+    var slices = await loadDbChunks();
+    var stream = new Blob(slices).stream().pipeThrough(new DecompressionStream("gzip"));
+    var buf = await new Response(stream).arrayBuffer();
+    db = new SQL.Database(new Uint8Array(buf));
+  } catch (e) {
+    console.error("loading the archive failed:", e);
+    showPickerNotice(SQL, "could not open the archive: " + e.message);
+    return;
+  }
+  onDbLoaded();
+}
+
+"""
+
+
+def _js_viewer_options(opts: _ViewerOptions) -> str:
+    """Option globals and the helpers that read them; empty for the default
+    page so ``--format html`` output does not change."""
+    if opts.is_default:
+        return ""
+    return (
+        '/* -- viewer options (set by the exporter) -------------------------- */\n'
+        f'var MEDIA_BASE = {_js_literal(opts.media_base)};\n'
+        f'var STRICT_NETWORK = {_js_literal(opts.strict_network)};\n'
+        f'var DB_CHUNKS = {_js_literal(opts.db_chunks)};\n'
+        + _JS_VIEWER_HELPERS
+    )
+
+
+def _js_safe_local_media(opts: _ViewerOptions) -> str:
+    """The ``safeMediaUrl`` lines that accept local media paths."""
+    if opts.is_default:
+        return '  if (/^assets\\//i.test(url)) return url;\n'
+    return (
+        '  if (/^assets\\//i.test(url)) return localMediaUrl(url.slice(7));\n'
+        '  if (url.slice(0, MEDIA_BASE.length) === MEDIA_BASE) return localMediaUrl(url.slice(MEDIA_BASE.length));\n'
+    )
+
+
+def _js_strict_remote_media(opts: _ViewerOptions) -> str:
+    """``renderMedia``: under STRICT_NETWORK, remote media become links."""
+    if opts.is_default:
+        return ''
+    return (
+        '  /* STRICT_NETWORK: never load remote media; offer a link instead */\n'
+        '  if (STRICT_NETWORK && /^https?:/i.test(safeUrl)) {\n'
+        '    return \'<a href="\' + escAttr(safeUrl) + \'" target="_blank" rel="noopener noreferrer">\' + esc(fname || safeUrl) + "</a>";\n'
+        '  }\n'
+        '\n'
+    )
+
+
+def _js_markdown_image_body(opts: _ViewerOptions) -> str:
+    """Body of the markdown ``![alt](url)`` replacer (``url`` and ``alt`` are
+    already HTML-escaped by ``renderMarkdown``)."""
+    if opts.is_default:
+        return (
+            '    if (/^(https?:|data:image\\/|assets\\/)/.test(url)) return \'<img src="\' + escAttr(url) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\';\n'
+            '    return m;\n'
+        )
+    return (
+        '    var src = "";\n'
+        '    if (/^https?:/.test(url)) {\n'
+        '      if (STRICT_NETWORK) return \'<a href="\' + escAttr(url) + \'" target="_blank" rel="noopener noreferrer">\' + (alt || url) + \'</a>\';\n'
+        '      src = url;\n'
+        '    } else if (/^data:image\\//.test(url)) {\n'
+        '      src = url;\n'
+        '    } else if (/^assets\\//.test(url)) {\n'
+        '      src = localMediaUrl(url.slice(7));\n'
+        '    }\n'
+        '    if (src) return \'<img src="\' + escAttr(src) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\';\n'
+        '    return m;\n'
+    )
+
+
+def _js_init_sql(opts: _ViewerOptions) -> str:
+    """The start of ``initApp``: initialize sql.js (and, for a site/ page,
+    take the chunk-script path instead of the fetch cascade)."""
+    if opts.is_default:
+        return (
+            '  var SQL = await initSqlJs({\n'
+            '    locateFile: function() { return WASM_URL; }\n'
+            '  });\n'
+            '\n'
+        )
+    return (
+        '  var SQL = await initSqlJs(sqlJsConfig());\n'
+        '\n'
+        '  // 0. A site/ page ships the DB as db/NNN.js chunk scripts (file:// safe)\n'
+        '  if (DB_CHUNKS !== null) {\n'
+        '    await openChunkedDb(SQL);\n'
+        '    return;\n'
+        '  }\n'
+        '\n'
+    )
+
+
+def _js_core(opts: _ViewerOptions = _ViewerOptions()) -> str:
     """DB loading, query helpers, state management."""
     return (
         '/* -- globals --------------------------------------------------------- */\n'
@@ -1305,11 +1607,8 @@ def _js_core() -> str:
         ' * 4. Fall back to file picker (drag-and-drop + input)\n'
         ' */\n'
         'async function initApp() {\n'
-        '  var SQL = await initSqlJs({\n'
-        '    locateFile: function() { return WASM_URL; }\n'
-        '  });\n'
-        '\n'
-        '  // 1. Check URL parameter\n'
+        + _js_init_sql(opts)
+        + '  // 1. Check URL parameter\n'
         '  var urlParams = new URLSearchParams(window.location.search);\n'
         '  var dbParam = urlParams.get("db");\n'
         '\n'
@@ -1465,7 +1764,7 @@ def _js_core() -> str:
     )
 
 
-def _js_ui() -> str:
+def _js_ui(opts: _ViewerOptions = _ViewerOptions()) -> str:
     """Rendering, filters, conversation display, timeline."""
     return (
         '/* -- app lifecycle --------------------------------------------------- */\n'
@@ -2063,8 +2362,8 @@ def _js_ui() -> str:
         '  if (/["\\\'<>`\\s]/.test(url)) return "";\n'
         '  if (/^https?:/i.test(url)) return url;\n'
         '  if (/^data:(image|audio|video)\\//i.test(url)) return url;\n'
-        '  if (/^assets\\//i.test(url)) return url;\n'
-        '  if (/^mailto:/i.test(url)) return url;\n'
+        + _js_safe_local_media(opts)
+        + '  if (/^mailto:/i.test(url)) return url;\n'
         '  return "";\n'
         '}\n'
         '\n'
@@ -2087,7 +2386,8 @@ def _js_ui() -> str:
         '    return \'<span class="media-missing" title="Original URL: \' + escAttr(url) + \'">\\u{1F5BC} \' + esc(label) + \'</span>\';\n'
         '  }\n'
         '\n'
-        '  if (mt.startsWith("image/")) {\n'
+        + _js_strict_remote_media(opts)
+        + '  if (mt.startsWith("image/")) {\n'
         '    return \'<img src="\' + escAttr(safeUrl) + \'" alt="\' + escAttr(fname || "image") + \'" loading="lazy">\';\n'
         '  }\n'
         '  if (mt.startsWith("audio/")) {\n'
@@ -2144,9 +2444,8 @@ def _js_ui() -> str:
         '\n'
         '  /* Images: ![alt](url) */\n'
         '  text = text.replace(/!\\[([^\\]]*)]\\(([^)]+)\\)/g, function(m, alt, url) {\n'
-        '    if (/^(https?:|data:image\\/|assets\\/)/.test(url)) return \'<img src="\' + escAttr(url) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\';\n'
-        '    return m;\n'
-        '  });\n'
+        + _js_markdown_image_body(opts)
+        + '  });\n'
         '\n'
         '  /* Links: [text](url) */\n'
         '  text = text.replace(/\\[([^\\]]+)]\\(([^)]+)\\)/g, function(m, text2, url) {\n'
