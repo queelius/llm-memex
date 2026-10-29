@@ -13,7 +13,8 @@ ubiquitous (every OS and scripting language has supported them for 30+ years).
 import io
 import json
 from datetime import date
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List
 
 from arkiv import records_to_jsonl, write_bundle
 
@@ -51,6 +52,54 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     })
 
 
+def write_directory(
+    conversations: Iterable[Conversation],
+    out_dir: Path,
+    *,
+    include_notes: bool = True,
+    db: Any = None,
+) -> int:
+    """Stream *conversations* into an arkiv directory bundle; return their count.
+
+    Output is byte-identical to :func:`export` for the same conversations, but
+    only one conversation's records are in memory at a time: each is serialized
+    and appended to ``conversations.jsonl`` before the next is requested from
+    the iterable. ``schema.yaml`` statistics are accumulated from the same
+    stream, so the records are never held together. *out_dir* (and parents) is
+    created if missing.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    num_conversations = 0
+    record_count = 0
+
+    with open(out_dir / MEMBER, "wb") as fh:
+
+        def written_records() -> Iterator[Dict[str, Any]]:
+            nonlocal num_conversations, record_count
+            for conv in conversations:
+                num_conversations += 1
+                chunk = list(
+                    _conversation_records(conv, include_notes=include_notes, db=db)
+                )
+                # records_to_jsonl concatenates per-record lines, so chunks
+                # concatenate to exactly what one call over all records yields.
+                fh.write(records_to_jsonl(chunk))
+                fh.flush()  # on disk before the next conversation is pulled
+                record_count += len(chunk)
+                yield from chunk
+
+        schema = _compute_schema(written_records())
+
+    (out_dir / "schema.yaml").write_bytes(
+        _schema_yaml_bytes(schema, record_count=record_count)
+    )
+    (out_dir / "README.md").write_bytes(
+        _readme_bytes(num_conversations=num_conversations)
+    )
+    return num_conversations
+
+
 def _build_records(
     conversations: List[Conversation],
     *,
@@ -58,94 +107,101 @@ def _build_records(
     db: Any = None,
 ) -> List[Dict[str, Any]]:
     """Convert conversations to arkiv records (one per message)."""
-    records = []
+    records: List[Dict[str, Any]] = []
     for conv in conversations:
-        # Pre-fetch message-level notes for this conversation
-        msg_notes: Dict[str, List[Dict[str, Any]]] = {}
-        if include_notes and db:
-            for note in db.get_notes(
-                conversation_id=conv.id, target_kind="message"
-            ):
-                mid = note.get("message_id")
-                if mid:
-                    msg_notes.setdefault(mid, []).append(note)
-
-        conv_tags = conv.tags
-        for msg in conv.messages.values():
-            text = msg.get_text()
-            if not text:
-                continue
-
-            timestamp = (
-                msg.created_at.isoformat()
-                if msg.created_at
-                else conv.created_at.isoformat()
-            )
-
-            metadata: Dict[str, Any] = {"conversation_id": conv.id, "role": msg.role}
-            if conv.title:
-                metadata["conversation_title"] = conv.title
-            if conv.source:
-                metadata["source"] = conv.source
-            if msg.model:
-                metadata["model"] = msg.model
-            elif conv.model:
-                metadata["model"] = conv.model
-            metadata["message_id"] = msg.id
-            if conv_tags:
-                metadata["tags"] = conv_tags
-
-            # Attach message-level notes
-            notes_for_msg = msg_notes.get(msg.id, [])
-            if notes_for_msg:
-                metadata["notes"] = [
-                    {"id": n["id"], "text": n["text"]} for n in notes_for_msg
-                ]
-
-            records.append(
-                {
-                    "mimetype": "text/plain",
-                    "content": text,
-                    "timestamp": timestamp,
-                    "metadata": metadata,
-                }
-            )
-
-        # Conversation-level notes (the default annotation path in a
-        # published SPA, where chat is off) have no message_id, so they were
-        # never emitted by the per-message loop and silently lost on the
-        # round-trip. Emit one carrier record per conversation that has them.
-        if include_notes and db:
-            conv_notes = [
-                n
-                for n in db.get_notes(
-                    conversation_id=conv.id, target_kind="conversation"
-                )
-                if n.get("id") and n.get("text")
-            ]
-            if conv_notes:
-                carrier_meta: Dict[str, Any] = {
-                    "conversation_id": conv.id,
-                    "target_kind": "conversation",
-                    "conversation_notes": [
-                        {"id": n["id"], "text": n["text"]} for n in conv_notes
-                    ],
-                }
-                if conv.title:
-                    carrier_meta["conversation_title"] = conv.title
-                records.append(
-                    {
-                        "mimetype": "text/plain",
-                        "content": conv.title or conv.id,
-                        "timestamp": conv.created_at.isoformat(),
-                        "metadata": carrier_meta,
-                    }
-                )
+        records.extend(_conversation_records(conv, include_notes=include_notes, db=db))
     return records
 
 
+def _conversation_records(
+    conv: Conversation,
+    *,
+    include_notes: bool = True,
+    db: Any = None,
+) -> Iterator[Dict[str, Any]]:
+    """Yield the arkiv records of one conversation (one per message, plus a
+    carrier record when it has conversation-level notes)."""
+    # Pre-fetch message-level notes for this conversation
+    msg_notes: Dict[str, List[Dict[str, Any]]] = {}
+    if include_notes and db:
+        for note in db.get_notes(
+            conversation_id=conv.id, target_kind="message"
+        ):
+            mid = note.get("message_id")
+            if mid:
+                msg_notes.setdefault(mid, []).append(note)
+
+    conv_tags = conv.tags
+    for msg in conv.messages.values():
+        text = msg.get_text()
+        if not text:
+            continue
+
+        timestamp = (
+            msg.created_at.isoformat()
+            if msg.created_at
+            else conv.created_at.isoformat()
+        )
+
+        metadata: Dict[str, Any] = {"conversation_id": conv.id, "role": msg.role}
+        if conv.title:
+            metadata["conversation_title"] = conv.title
+        if conv.source:
+            metadata["source"] = conv.source
+        if msg.model:
+            metadata["model"] = msg.model
+        elif conv.model:
+            metadata["model"] = conv.model
+        metadata["message_id"] = msg.id
+        if conv_tags:
+            metadata["tags"] = conv_tags
+
+        # Attach message-level notes
+        notes_for_msg = msg_notes.get(msg.id, [])
+        if notes_for_msg:
+            metadata["notes"] = [
+                {"id": n["id"], "text": n["text"]} for n in notes_for_msg
+            ]
+
+        yield {
+            "mimetype": "text/plain",
+            "content": text,
+            "timestamp": timestamp,
+            "metadata": metadata,
+        }
+
+    # Conversation-level notes (the default annotation path in a
+    # published SPA, where chat is off) have no message_id, so they were
+    # never emitted by the per-message loop and silently lost on the
+    # round-trip. Emit one carrier record per conversation that has them.
+    if include_notes and db:
+        conv_notes = [
+            n
+            for n in db.get_notes(
+                conversation_id=conv.id, target_kind="conversation"
+            )
+            if n.get("id") and n.get("text")
+        ]
+        if conv_notes:
+            carrier_meta: Dict[str, Any] = {
+                "conversation_id": conv.id,
+                "target_kind": "conversation",
+                "conversation_notes": [
+                    {"id": n["id"], "text": n["text"]} for n in conv_notes
+                ],
+            }
+            if conv.title:
+                carrier_meta["conversation_title"] = conv.title
+            yield {
+                "mimetype": "text/plain",
+                "content": conv.title or conv.id,
+                "timestamp": conv.created_at.isoformat(),
+                "metadata": carrier_meta,
+            }
+
+
 def _compute_schema(
-    records: List[Dict[str, Any]],
+    records: Iterable[Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
     """Compute metadata key statistics from emitted records.
 

@@ -242,3 +242,87 @@ class TestHtmlExportEncoding:
         monkeypatch.setattr(pathlib.Path, "write_text", spy_write_text)
         html_exporter.export([], str(tmp_path / "site"))
         assert captured.get("encoding") == "utf-8"
+
+
+class TestArkivStreaming:
+    """write_directory streams conversations and matches export() byte for byte."""
+
+    NAMES = ("conversations.jsonl", "schema.yaml", "README.md")
+
+    def _convs(self):
+        return [_make_conv(f"c{i}", f"Chat {i}") for i in range(3)]
+
+    def _assert_same(self, a, b):
+        for name in self.NAMES:
+            assert (a / name).read_bytes() == (b / name).read_bytes(), name
+
+    def test_write_directory_matches_export(self, tmp_path):
+        from llm_memex.exporters.arkiv_export import export, write_directory
+
+        convs = self._convs()
+        a, b = tmp_path / "a", tmp_path / "b"
+        n = write_directory(iter(convs), a)
+        export(convs, str(b))
+        assert n == 3
+        self._assert_same(a, b)
+
+    def test_write_directory_matches_export_with_notes(self, tmp_path):
+        from llm_memex.db import Database
+        from llm_memex.exporters.arkiv_export import export, write_directory
+
+        db = Database(str(tmp_path / "db"))
+        convs = self._convs()
+        for c in convs:
+            db.save_conversation(c)
+        db.add_note(conversation_id="c1", message_id="m1", text="msg note")
+        db.add_note(conversation_id="c2", text="conversation note")
+        a, b = tmp_path / "a", tmp_path / "b"
+        write_directory(iter(convs), a, db=db)
+        export(convs, str(b), db=db)
+        self._assert_same(a, b)
+        assert b"msg note" in (a / "conversations.jsonl").read_bytes()
+        assert b"conversation note" in (a / "conversations.jsonl").read_bytes()
+        db.close()
+
+    def test_write_directory_without_notes(self, tmp_path):
+        from llm_memex.db import Database
+        from llm_memex.exporters.arkiv_export import export, write_directory
+
+        db = Database(str(tmp_path / "db"))
+        convs = self._convs()
+        for c in convs:
+            db.save_conversation(c)
+        db.add_note(conversation_id="c1", message_id="m1", text="msg note")
+        a, b = tmp_path / "a", tmp_path / "b"
+        write_directory(iter(convs), a, include_notes=False, db=db)
+        export(convs, str(b), include_notes=False, db=db)
+        self._assert_same(a, b)
+        assert b"msg note" not in (a / "conversations.jsonl").read_bytes()
+        db.close()
+
+    def test_empty_iterable(self, tmp_path):
+        from llm_memex.exporters.arkiv_export import export, write_directory
+
+        a, b = tmp_path / "a", tmp_path / "b"
+        assert write_directory(iter([]), a) == 0
+        export([], str(b))
+        self._assert_same(a, b)
+        assert (a / "conversations.jsonl").read_bytes() == b""
+
+    def test_consumes_lazily_one_conversation_at_a_time(self, tmp_path):
+        """The writer never pulls ahead: each conversation is on disk before the
+        next one is requested."""
+        from llm_memex.exporters.arkiv_export import write_directory
+
+        out = tmp_path / "nested" / "out"
+        sizes = []
+
+        def gen():
+            for c in self._convs():
+                sizes.append((out / "conversations.jsonl").stat().st_size
+                             if (out / "conversations.jsonl").exists() else 0)
+                yield c
+
+        write_directory(gen(), out)
+        assert sizes[0] == 0
+        assert sizes[0] < sizes[1] < sizes[2]
