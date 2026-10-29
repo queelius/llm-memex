@@ -109,7 +109,9 @@ The viewer loads the whole database into the browser, so it is limited to archiv
 
 Archived conversations (unless `--include-archived`) and notes (under `--no-notes`) are left out of every part.
 
-Exporting again into the same folder is safe. Only the files the previous export listed in `SHA256SUMS` are replaced or removed; files you added by hand are kept. A folder that this command did not write (no `generator: llm-memex longecho` stamp in its `README.md`) is refused and left untouched.
+Exporting again into the same folder is safe. Only the files the previous export listed in `SHA256SUMS` are replaced or removed; files you added by hand are kept, except under `data/arkiv/` and `data/assets/`, which the export rewrites whole: there it stops before changing anything and asks you to move them out. A folder that this command did not write (no `generator: llm-memex longecho` stamp in its `README.md`) is refused and left untouched. Every refusal happens before anything is deleted, so the previous export stays as it was. If an export fails partway (a full disk, Ctrl-C), run it again: it replaces what the failed run left.
+
+The export needs free space of about three times the database: a temporary snapshot in `$TMPDIR`, then `data/` and `text/` in the destination. Point `TMPDIR` at another disk if the default one is short of space (`TMPDIR=/mnt/big llm-memex export ...`).
 
 ## Notes (Marginalia)
 
