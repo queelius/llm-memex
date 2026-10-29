@@ -13,7 +13,7 @@ import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
@@ -305,6 +305,25 @@ def render_site_readme() -> str:
     return _frontmatter(meta) + "\n" + body
 
 
+def render_placeholder_readme() -> str:
+    """A stand-in root README, written while an export is under way.
+
+    It carries the ownership stamp, so an export that is interrupted before the
+    real README replaces it leaves a folder the next run recognises as ours
+    (and reports as interrupted) instead of one it refuses as foreign.
+    """
+    meta = {
+        "name": "llm-memex archive (export in progress)",
+        "description": "An export is in progress or was interrupted.",
+        "generator": _generator(),
+    }
+    return (
+        _frontmatter(meta)
+        + "\nAn llm-memex export is in progress in this folder, or was interrupted "
+        "before it finished. Remove the folder and export again.\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # SHA256SUMS
 # ---------------------------------------------------------------------------
@@ -347,35 +366,48 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_sha256sums(out_dir: Path) -> None:
-    """Write ``SHA256SUMS`` (sha256sum format) for every regular file under *out_dir*.
+def write_sha256sums(out_dir: Path, written: Iterable[PurePosixPath]) -> None:
+    """Write ``SHA256SUMS`` (sha256sum format) for the files an export wrote.
 
-    Symlinks are neither followed nor listed, so nothing outside *out_dir* can
-    be hashed or later deleted on its behalf. ``SHA256SUMS`` itself (and the
-    temp file used to write it) is excluded.
+    *written* is the set of paths, relative to *out_dir* in POSIX form, that
+    this run created. Only those are listed, because the next export deletes
+    exactly the listed files: a file a person added by hand must never be
+    listed. Symlinks, missing paths and anything that is not a regular file
+    are skipped (defensively: the exporter never writes one), so nothing
+    outside *out_dir* can be hashed or later deleted on its behalf.
+    ``SHA256SUMS`` itself (and the temp file used to write it) is excluded.
     """
     out_dir = Path(out_dir)
-    entries: List[Tuple[str, Path]] = []
-    for dirpath, _dirnames, filenames in os.walk(out_dir, followlinks=False):
-        for filename in filenames:
-            full = Path(dirpath) / filename
-            if full.is_symlink() or not full.is_file():
-                continue
-            rel = full.relative_to(out_dir).as_posix()
-            if rel not in (SUMS_NAME, _SUMS_TMP_NAME):  # a stale temp of ours
-                entries.append((rel, full))
-    entries.sort(key=lambda entry: entry[0])
+    entries: Dict[str, Path] = {}
+    for item in written:
+        rel = _listed_relpath(PurePosixPath(item).as_posix())
+        if rel is None or rel.as_posix() in (SUMS_NAME, _SUMS_TMP_NAME):
+            continue
+        full = out_dir.joinpath(*rel.parts)
+        if full.is_symlink() or not full.is_file():
+            continue
+        entries[rel.as_posix()] = full
 
     lines = []
-    for rel, full in entries:
+    for rel in sorted(entries):
         name, escaped = _escape_name(rel)
         prefix = "\\" if escaped else ""
-        lines.append(f"{prefix}{_hash_file(full)}  {name}\n")
+        lines.append(f"{prefix}{_hash_file(entries[rel])}  {name}\n")
 
     # Replace atomically, so an interrupted run never leaves a half-written file.
     tmp = out_dir / _SUMS_TMP_NAME
     tmp.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
     os.replace(tmp, out_dir / SUMS_NAME)
+
+
+def listed_paths(sums_file: Path) -> Set[PurePosixPath]:
+    """The plain relative paths a ``SHA256SUMS`` file lists.
+
+    Entries that are not plain relative paths (absolute, ``..``, empty) are
+    left out, exactly as :func:`prepare_destination` leaves them alone.
+    """
+    text = Path(sums_file).read_bytes().decode("utf-8", "surrogateescape")
+    return {rel for rel in map(_listed_relpath, _parse_sums(text)) if rel is not None}
 
 
 def _parse_sums(text: str) -> List[str]:

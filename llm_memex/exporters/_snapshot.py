@@ -54,7 +54,7 @@ def strip_fts5_and_vacuum(
     files are left next to the exported database when the process is
     interrupted, and a subsequent VACUUM produces a fully-packed file.
     """
-    with sqlite3.connect(str(db_path)) as conn:
+    with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
         for fts in _FTS5_TABLES:
             conn.execute(f"DROP TABLE IF EXISTS {fts}")
@@ -80,7 +80,7 @@ def strip_fts5_and_vacuum(
         if drop_notes:
             conn.execute("DROP TABLE IF EXISTS notes")
         conn.commit()
-    with sqlite3.connect(str(db_path)) as conn:
+    with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute("VACUUM")
 
 
@@ -116,7 +116,7 @@ def copy_retained_assets(db_path: Path, source: Path, destination: Path) -> None
     if destination.exists():
         shutil.rmtree(destination)
     root = source.resolve()
-    with sqlite3.connect(db_path) as conn:
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
         for (content,) in conn.execute("SELECT content FROM messages"):
             for url in media_urls(json.loads(content)):
                 parsed = urlsplit(url)

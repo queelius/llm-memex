@@ -1,10 +1,11 @@
 """Tests for the longecho README, checksum, and destination rules."""
 import hashlib
+import os
 import shutil
 import sqlite3
 import subprocess
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -14,7 +15,9 @@ from llm_memex.exporters._longecho_docs import (
     GENERATOR_PREFIX,
     README_QUERIES,
     ArchiveSummary,
+    listed_paths,
     prepare_destination,
+    render_placeholder_readme,
     render_root_readme,
     render_site_readme,
     summarize,
@@ -22,6 +25,20 @@ from llm_memex.exporters._longecho_docs import (
 )
 from llm_memex.exporters._snapshot import strip_fts5_and_vacuum
 from llm_memex.models import Conversation, Message, text_block
+
+
+def _everything(out_dir):
+    """Every non-directory entry under out_dir (symlinks included, not followed)."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
+        names = filenames + [d for d in dirnames if (Path(dirpath) / d).is_symlink()]
+        found += [PurePosixPath((Path(dirpath) / n).relative_to(out_dir).as_posix())
+                  for n in names]
+    return found
+
+
+def _sum_everything(out_dir):
+    write_sha256sums(out_dir, _everything(out_dir))
 
 
 def _summary(**overrides):
@@ -198,7 +215,7 @@ def _stamped_export(out_dir, files, *, sums=True, generator=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     if sums:
-        write_sha256sums(out_dir)
+        _sum_everything(out_dir)
 
 
 def test_prepare_creates_missing_and_accepts_empty(tmp_path):
@@ -355,14 +372,14 @@ def test_sha256sums_format_and_coverage(tmp_path):
     _stamped_export(out, {"b/two.txt": "two", "a/one.txt": "one", "zero.bin": ""},
                     sums=False)
     (out / "big.bin").write_bytes(b"x" * (2 * 1024 * 1024 + 17))  # > one 1 MB read
-    write_sha256sums(out)
+    _sum_everything(out)
     text = (out / "SHA256SUMS").read_text()
     assert text == _expected_sums(out)
     paths = [line[66:] for line in text.splitlines()]
     assert paths == sorted(paths)
     assert "SHA256SUMS" not in paths
     # idempotent: a second run does not list SHA256SUMS or change the result
-    write_sha256sums(out)
+    _sum_everything(out)
     assert (out / "SHA256SUMS").read_text() == text
 
 
@@ -372,7 +389,7 @@ def test_sha256sums_verifies(tmp_path):
     _stamped_export(out, {"text/a.md": "a", "data/b.db": "b", "odd name \\ x.txt": "c"},
                     sums=False)
     (out / "new\nline.txt").write_text("nl")
-    write_sha256sums(out)
+    _sum_everything(out)
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=out,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -392,7 +409,7 @@ def test_sha256sums_skips_symlinks(tmp_path):
     _stamped_export(out, {"data/x.txt": "x"}, sums=False)
     (out / "linkdir").symlink_to(outside, target_is_directory=True)
     (out / "linkfile").symlink_to(other)
-    write_sha256sums(out)
+    _sum_everything(out)
     paths = [line[66:] for line in (out / "SHA256SUMS").read_text().splitlines()]
     assert paths == ["README.md", "data/x.txt"]
 
@@ -401,7 +418,7 @@ def test_escaped_names_round_trip_through_prepare(tmp_path):
     out = tmp_path / "out"
     _stamped_export(out, {"data/back\\slash.txt": "b"}, sums=False)
     (out / "data" / "new\nline.txt").write_text("n")
-    write_sha256sums(out)
+    _sum_everything(out)
     prepare_destination(out)
     assert not (out / "data").exists()
 
@@ -488,7 +505,7 @@ def test_own_readme_with_triple_dash_owner_is_accepted_back(tmp_path):
     (out / "README.md").write_text(render_root_readme(_summary(owner="Ada\n---\nLovelace")))
     (out / "data").mkdir()
     (out / "data" / "x.txt").write_text("x")
-    write_sha256sums(out)
+    _sum_everything(out)
     prepare_destination(out)
     assert not (out / "data").exists()
 
@@ -497,7 +514,7 @@ def test_sha256sums_ignores_stale_temp_file(tmp_path):
     out = tmp_path / "out"
     _stamped_export(out, {"data/x.txt": "x"}, sums=False)
     (out / ".SHA256SUMS.tmp").write_text("left by an interrupted run")
-    write_sha256sums(out)
+    _sum_everything(out)
     paths = [line[66:] for line in (out / "SHA256SUMS").read_text().splitlines()]
     assert paths == ["README.md", "data/x.txt"]
     assert not (out / ".SHA256SUMS.tmp").exists()  # replaced, not left behind
@@ -517,3 +534,42 @@ def test_readme_single_date():
     body = render_root_readme(_summary(first="2025-06-03", last="2025-06-03"))
     assert "All of it is from 2025-06-03" in body
     assert "oldest conversation" not in body
+
+
+# ------------------------------------------------------- explicit written set
+
+def test_sha256sums_lists_only_what_was_written(tmp_path):
+    out = tmp_path / "out"
+    _stamped_export(out, {"text/ours.md": "ours", "text/mine.md": "hand-made"}, sums=False)
+    write_sha256sums(out, [PurePosixPath("README.md"), PurePosixPath("text/ours.md")])
+    assert [line[66:] for line in (out / "SHA256SUMS").read_text().splitlines()] == [
+        "README.md", "text/ours.md"]
+    assert listed_paths(out / "SHA256SUMS") == {
+        PurePosixPath("README.md"), PurePosixPath("text/ours.md")}
+    prepare_destination(out)
+    assert (out / "text" / "mine.md").read_text() == "hand-made"
+    assert not (out / "text" / "ours.md").exists()
+
+
+def test_sha256sums_skips_unusable_written_entries(tmp_path):
+    out = tmp_path / "out"
+    _stamped_export(out, {"data/x.txt": "x"}, sums=False)
+    (out / "link").symlink_to(out / "data" / "x.txt")
+    write_sha256sums(out, [
+        PurePosixPath("data/x.txt"), PurePosixPath("data/x.txt"),  # duplicate
+        PurePosixPath("link"), PurePosixPath("missing"), PurePosixPath("data"),
+        PurePosixPath("SHA256SUMS"), PurePosixPath("../escape"), PurePosixPath("/etc/passwd"),
+    ])
+    assert [line[66:] for line in (out / "SHA256SUMS").read_text().splitlines()] == [
+        "data/x.txt"]
+
+
+def test_placeholder_readme_is_stamped_and_recognised_as_interrupted(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "README.md").write_text(render_placeholder_readme())
+    front, body = _split(render_placeholder_readme())
+    assert front["generator"].startswith(GENERATOR_PREFIX)
+    assert "in progress" in body
+    with pytest.raises(ValueError, match="interrupted"):
+        prepare_destination(out)

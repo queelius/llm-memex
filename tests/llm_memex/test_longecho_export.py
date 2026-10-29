@@ -1,5 +1,6 @@
 """End-to-end tests for ``--format longecho`` (llm_memex.exporters.longecho)."""
 import base64
+import contextlib
 import gzip
 import re
 import shutil
@@ -113,14 +114,38 @@ def test_layout(source, tmp_path):
     assert not (out / "data" / "conversations.db-journal").exists()
 
 
-def test_sums_cover_every_file_and_verify(source, tmp_path):
+def _sums_listing(out):
+    return [line.split("  ", 1)[1] for line in (out / "SHA256SUMS").read_text().splitlines()]
+
+
+def test_sums_list_exactly_what_the_export_wrote_and_verify(source, tmp_path):
     out = tmp_path / "out"
     _export(source, out)
-    listed = {line.split("  ", 1)[1]
-              for line in (out / "SHA256SUMS").read_text().splitlines()}
-    on_disk = {p.relative_to(out).as_posix() for p in _all_files(out)} - {"SHA256SUMS"}
-    assert listed == on_disk
+    expected = [
+        "README.md", "data/arkiv/README.md", "data/arkiv/conversations.jsonl",
+        "data/arkiv/schema.yaml", "data/assets/pic.png", "data/conversations.db",
+        "site/README.md", "site/db/000.js", "site/index.html",
+        "site/sql-wasm-binary.js", "site/sql-wasm.js", "text/index.md",
+    ] + sorted(p.relative_to(out).as_posix()
+               for p in (out / "text" / "2025").glob("*.md"))
+    assert _sums_listing(out) == sorted(expected)
     assert _sha256_ok(out).returncode == 0
+
+
+def test_hand_added_files_survive_repeated_reexports(source, tmp_path):
+    out = tmp_path / "out"
+    _export(source, out)
+    (out / "my-notes.txt").write_text("root")
+    (out / "text" / "mine.md").write_text("in text")
+    (out / "data" / "extra.txt").write_text("in data")
+    for _ in range(2):
+        _export(source, out)
+        assert (out / "my-notes.txt").read_text() == "root"
+        assert (out / "text" / "mine.md").read_text() == "in text"
+        assert (out / "data" / "extra.txt").read_text() == "in data"
+        listed = _sums_listing(out)
+        assert not {"my-notes.txt", "text/mine.md", "data/extra.txt"} & set(listed)
+        assert _sha256_ok(out).returncode == 0
 
 
 def test_readme_stamped_and_site_uses_data_assets(source, tmp_path):
@@ -156,8 +181,8 @@ def test_privacy_every_part(source, tmp_path, include_notes):
         for leak in leaks:
             assert leak not in blob, f"{leak!r} leaked into {name}"
 
-    snapshot_count = sqlite3.connect(out / "data" / "conversations.db").execute(
-        "SELECT COUNT(*) FROM conversations").fetchone()[0]
+    with contextlib.closing(sqlite3.connect(out / "data" / "conversations.db")) as conn:
+        snapshot_count = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
     assert snapshot_count == 2
     assert f"{snapshot_count} conversations" in (out / "README.md").read_text()
     if include_notes:
@@ -200,22 +225,15 @@ def test_reexport_removes_dropped_conversation(source, tmp_path):
     out = tmp_path / "out"
     _export(source, out)
     before = {p.name for p in (out / "text").rglob("*.md")}
-    with sqlite3.connect(source) as conn:
+    with contextlib.closing(sqlite3.connect(source)) as conn:
         conn.execute("UPDATE conversations SET archived_at = '2026-01-01T00:00:00' "
                      "WHERE id = 'pictured'")
+        conn.commit()
     assert _export(source, out) == 1
     after = {p.name for p in (out / "text").rglob("*.md")}
     assert len(before) == 3 and len(after) == 2  # two conversations plus index.md, then one
     assert not (out / "data" / "assets" / "pic.png").exists()
     assert _sha256_ok(out).returncode == 0
-
-
-def test_reexport_keeps_a_file_the_person_added(source, tmp_path):
-    out = tmp_path / "out"
-    _export(source, out)
-    (out / "my-notes.txt").write_text("mine")
-    _export(source, out)
-    assert (out / "my-notes.txt").read_text() == "mine"
 
 
 def test_refuses_a_folder_it_did_not_write(source, tmp_path):
@@ -309,15 +327,87 @@ def test_refuses_symlinked_destination_entry(source, tmp_path, name):
 
 
 @pytest.mark.parametrize("name", ["data/arkiv", "data/assets"])
-def test_refuses_foreign_content_where_it_would_write(source, tmp_path, name):
+def test_refuses_foreign_content_before_deleting_anything(source, tmp_path, name):
     out = tmp_path / "out"
     _export(source, out)
     foreign = out / name / "hand-made.txt"
-    foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_text("mine")
-    with pytest.raises(ValueError, match=re.escape(f"{out / name} already exists")):
+    with pytest.raises(ValueError, match=re.escape(f"{foreign} was not written")):
         _export(source, out)
     assert foreign.read_text() == "mine"
+    # the previous export is still whole: nothing was deleted before refusing
+    assert (out / "data" / "conversations.db").is_file()
+    assert (out / "SHA256SUMS").is_file()
+    assert len(list((out / "text").rglob("*.md"))) == 3
+
+
+def test_refuses_foreign_empty_directory_where_it_would_write(source, tmp_path):
+    out = tmp_path / "out"
+    _export(source, out)
+    (out / "data" / "assets" / "mine").mkdir()
+    with pytest.raises(ValueError, match="was not written"):
+        _export(source, out)
+    assert (out / "data" / "conversations.db").is_file()
+
+
+# ----------------------------------------------- symlinks below the top level
+
+def _plant(out, tmp_path, kind):
+    """Replace a path below site/, text/ or data/ with a symlink to outside."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.txt").write_text("precious")
+    year = next((out / "text").iterdir())
+    if kind == "site-index":
+        (outside / "index.html").write_text("outside page")
+        (out / "site" / "index.html").unlink()
+        (out / "site" / "index.html").symlink_to(outside / "index.html")
+        return outside, "site/index.html"
+    if kind == "text-year":
+        name = year.name
+        shutil.rmtree(year)
+        year.symlink_to(outside, target_is_directory=True)
+        return outside, f"text/{name}"
+    if kind == "site-db":
+        shutil.rmtree(out / "site" / "db")
+        (out / "site" / "db").symlink_to(outside, target_is_directory=True)
+        return outside, "site/db"
+    if kind == "data-db":
+        (outside / "conversations.db").write_text("outside db")
+        (out / "data" / "conversations.db").unlink()
+        (out / "data" / "conversations.db").symlink_to(outside / "conversations.db")
+        return outside, "data/conversations.db"
+    raise AssertionError(kind)
+
+
+@pytest.mark.parametrize("kind", ["site-index", "text-year", "site-db", "data-db"])
+def test_refuses_nested_symlink_and_touches_nothing_outside(source, tmp_path, kind):
+    out = tmp_path / "out"
+    _export(source, out)
+    outside, rel = _plant(out, tmp_path, kind)
+    before = {p.relative_to(outside): p.read_bytes() for p in _all_files(outside)}
+    with pytest.raises(ValueError, match=re.escape(f"{out / rel} is a symbolic link")):
+        _export(source, out)
+    assert {p.relative_to(outside): p.read_bytes() for p in _all_files(outside)} == before
+    assert (out / rel).is_symlink()
+
+
+# ------------------------------------------------------- interrupted exports
+
+def test_interrupted_export_is_reported_as_interrupted(source, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(longecho, "copy_retained_assets", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        _export(source, out)
+    assert "generator: llm-memex longecho" in (out / "README.md").read_text()
+    assert not (out / "SHA256SUMS").exists()
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="interrupted"):
+        _export(source, out)
 
 
 # -------------------------------------------------------------- live source
@@ -326,7 +416,7 @@ def test_source_untouched(source, tmp_path):
     with Database(str(source.parent)) as db:
         db.conn.execute("PRAGMA wal_checkpoint(FULL)")
     _export(source, tmp_path / "out")
-    with sqlite3.connect(source) as conn:
+    with contextlib.closing(sqlite3.connect(source)) as conn:
         count = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         notes = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
     assert (count, notes) == (3, 2)
