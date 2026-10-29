@@ -1508,23 +1508,25 @@ def _js_strict_remote_media(opts: _ViewerOptions) -> str:
 
 def _js_markdown_image_body(opts: _ViewerOptions) -> str:
     """Body of the markdown ``![alt](url)`` replacer (``url`` and ``alt`` are
-    already HTML-escaped by ``renderMarkdown``)."""
+    already HTML-escaped by ``renderMarkdown``). Generated tags go through
+    ``keepTag`` so later passes never see their attributes."""
     if opts.is_default:
         return (
-            '    if (/^(https?:|data:image\\/|assets\\/)/.test(url)) return \'<img src="\' + escAttr(url) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\';\n'
+            '    if (/^(https?:|data:image\\/|assets\\/)/.test(url) && urlOk(url)) return keepTag(\'<img src="\' + escAttr(url) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\');\n'
             '    return m;\n'
         )
     return (
+        '    if (!urlOk(url)) return m;\n'
         '    var src = "";\n'
         '    if (/^https?:/.test(url)) {\n'
-        '      if (STRICT_NETWORK) return \'<a href="\' + escAttr(url) + \'" target="_blank" rel="noopener noreferrer">\' + (alt || url) + \'</a>\';\n'
+        '      if (STRICT_NETWORK) return keepTag(\'<a href="\' + escAttr(url) + \'" target="_blank" rel="noopener noreferrer">\') + (alt || url) + \'</a>\';\n'
         '      src = url;\n'
         '    } else if (/^data:image\\//.test(url)) {\n'
         '      src = url;\n'
         '    } else if (/^assets\\//.test(url)) {\n'
         '      src = localMediaUrl(url.slice(7));\n'
         '    }\n'
-        '    if (src) return \'<img src="\' + escAttr(src) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\';\n'
+        '    if (src) return keepTag(\'<img src="\' + escAttr(src) + \'" alt="\' + escAttr(alt) + \'" loading="lazy">\');\n'
         '    return m;\n'
     )
 
@@ -2409,6 +2411,10 @@ def _js_ui(opts: _ViewerOptions = _ViewerOptions()) -> str:
         'function renderMarkdown(text) {\n'
         '  if (!text) return "";\n'
         '\n'
+        '  /* NUL delimits the placeholders below; drop any in the input so it\n'
+        '     cannot forge one. */\n'
+        '  text = text.replace(/\\x00/g, "");\n'
+        '\n'
         '  /* Escape HTML entities first */\n'
         '  text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");\n'
         '\n'
@@ -2442,6 +2448,18 @@ def _js_ui(opts: _ViewerOptions = _ViewerOptions()) -> str:
         '  text = text.replace(/^[*-] (.+)$/gm, "<li>$1</li>");\n'
         '  text = text.replace(/((?:<li>.*<\\/li>\\n?)+)/g, "<ul>$1</ul>");\n'
         '\n'
+        '  /* Generated tags that carry attributes (img, a) are parked in\n'
+        '     placeholders and restored last, so no later pass (links, emphasis)\n'
+        '     can rewrite text inside an attribute value. */\n'
+        '  var tags = [];\n'
+        '  var keepTag = function(html) {\n'
+        '    tags.push(html);\n'
+        '    return "\\x00TG" + (tags.length - 1) + "\\x00";\n'
+        '  };\n'
+        '  /* Quotes, whitespace, brackets, angle brackets, backticks, and\n'
+        '     placeholders never belong in a link or image URL: leave it as text. */\n'
+        '  var urlOk = function(url) { return !/["\\\'\\s\\[\\]()<>`\\x00]/.test(url); };\n'
+        '\n'
         '  /* Images: ![alt](url) */\n'
         '  text = text.replace(/!\\[([^\\]]*)]\\(([^)]+)\\)/g, function(m, alt, url) {\n'
         + _js_markdown_image_body(opts)
@@ -2449,7 +2467,7 @@ def _js_ui(opts: _ViewerOptions = _ViewerOptions()) -> str:
         '\n'
         '  /* Links: [text](url) */\n'
         '  text = text.replace(/\\[([^\\]]+)]\\(([^)]+)\\)/g, function(m, text2, url) {\n'
-        '    if (/^(https?:|mailto:|#)/.test(url)) return \'<a href="\' + escAttr(url) + \'" target="_blank" rel="noopener noreferrer">\' + text2 + \'</a>\';\n'
+        '    if (/^(https?:|mailto:|#)/.test(url) && urlOk(url)) return keepTag(\'<a href="\' + escAttr(url) + \'" target="_blank" rel="noopener noreferrer">\') + text2 + \'</a>\';\n'
         '    return m;\n'
         '  });\n'
         '\n'
@@ -2481,6 +2499,11 @@ def _js_ui(opts: _ViewerOptions = _ViewerOptions()) -> str:
         '  /* Restore code block placeholders */\n'
         '  text = text.replace(/\\x00CB(\\d+)\\x00/g, function(m, idx) {\n'
         '    return codeBlocks[parseInt(idx)];\n'
+        '  });\n'
+        '\n'
+        '  /* Restore generated tags last: nothing rewrites them after this */\n'
+        '  text = text.replace(/\\x00TG(\\d+)\\x00/g, function(m, idx) {\n'
+        '    return tags[parseInt(idx)];\n'
         '  });\n'
         '\n'
         '  return text;\n'

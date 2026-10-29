@@ -2033,6 +2033,10 @@ function renderMedia(block) {
 function renderMarkdown(text) {
   if (!text) return "";
 
+  /* NUL delimits the placeholders below; drop any in the input so it
+     cannot forge one. */
+  text = text.replace(/\x00/g, "");
+
   /* Escape HTML entities first */
   text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -2066,15 +2070,27 @@ function renderMarkdown(text) {
   text = text.replace(/^[*-] (.+)$/gm, "<li>$1</li>");
   text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>");
 
+  /* Generated tags that carry attributes (img, a) are parked in
+     placeholders and restored last, so no later pass (links, emphasis)
+     can rewrite text inside an attribute value. */
+  var tags = [];
+  var keepTag = function(html) {
+    tags.push(html);
+    return "\x00TG" + (tags.length - 1) + "\x00";
+  };
+  /* Quotes, whitespace, brackets, angle brackets, backticks, and
+     placeholders never belong in a link or image URL: leave it as text. */
+  var urlOk = function(url) { return !/["\'\s\[\]()<>`\x00]/.test(url); };
+
   /* Images: ![alt](url) */
   text = text.replace(/!\[([^\]]*)]\(([^)]+)\)/g, function(m, alt, url) {
-    if (/^(https?:|data:image\/|assets\/)/.test(url)) return '<img src="' + escAttr(url) + '" alt="' + escAttr(alt) + '" loading="lazy">';
+    if (/^(https?:|data:image\/|assets\/)/.test(url) && urlOk(url)) return keepTag('<img src="' + escAttr(url) + '" alt="' + escAttr(alt) + '" loading="lazy">');
     return m;
   });
 
   /* Links: [text](url) */
   text = text.replace(/\[([^\]]+)]\(([^)]+)\)/g, function(m, text2, url) {
-    if (/^(https?:|mailto:|#)/.test(url)) return '<a href="' + escAttr(url) + '" target="_blank" rel="noopener noreferrer">' + text2 + '</a>';
+    if (/^(https?:|mailto:|#)/.test(url) && urlOk(url)) return keepTag('<a href="' + escAttr(url) + '" target="_blank" rel="noopener noreferrer">') + text2 + '</a>';
     return m;
   });
 
@@ -2106,6 +2122,11 @@ function renderMarkdown(text) {
   /* Restore code block placeholders */
   text = text.replace(/\x00CB(\d+)\x00/g, function(m, idx) {
     return codeBlocks[parseInt(idx)];
+  });
+
+  /* Restore generated tags last: nothing rewrites them after this */
+  text = text.replace(/\x00TG(\d+)\x00/g, function(m, idx) {
+    return tags[parseInt(idx)];
   });
 
   return text;

@@ -3,6 +3,10 @@ import base64
 import gzip
 import json
 import os
+import shutil
+import sqlite3
+import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -87,12 +91,6 @@ def test_media_options_without_chunks_use_fetch_cascade():
     assert '<script src="sql-wasm-binary.js">' not in page
 
 
-def test_too_large_archive_notice_points_at_text_and_data():
-    page = _site_template(db_chunks=0)
-    assert "var DB_CHUNKS = 0" in page
-    assert "text/" in page and "data/" in page
-
-
 @pytest.mark.parametrize("bad", [-1, True, 1.5, "3"])
 def test_rejects_invalid_db_chunks(bad):
     with pytest.raises((TypeError, ValueError)):
@@ -107,8 +105,10 @@ def test_rejects_invalid_media_options(kw):
 
 
 def test_media_base_is_embedded_as_safe_js_string():
-    page = get_template("SCHEMA", media_base='x"</script><b>/')
-    assert "</script><b>" not in page.split("<script>\n", 1)[1].split("</script>")[0]
+    hostile = get_template("SCHEMA", media_base='x"</script><b>/')
+    plain = get_template("SCHEMA", media_base="x/")
+    assert 'var MEDIA_BASE = "x\\"\\u003c/script>\\u003cb>/";' in hostile
+    assert hostile.count("</script>") == plain.count("</script>")
 
 
 # -- site writers -------------------------------------------------------------
@@ -171,3 +171,176 @@ def test_copy_sql_js(tmp_path):
     copy_sql_js(tmp_path / "site")
     assert (tmp_path / "site" / "sql-wasm.js").read_bytes() == \
         (VENDORED / "sql-wasm.js").read_bytes()
+
+
+# -- viewer JS, run in Node (vm + DOM stub in data/viewer_harness.js) ---------
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+DEFAULT_KW = {}
+STRICT_KW = dict(media_base="../data/assets/", strict_network=True, db_chunks=3)
+
+
+def _run_viewer(tmp_path: Path, program: str, *, site_dir: Path | None = None, **template_kw):
+    """Run ``program`` (an async JS function body; ``ctx`` is the page's global
+    scope) against the template's inline script and return its JSON result."""
+    page = get_template("SCHEMA", **template_kw)
+    inline = page.split("<script>\n", 1)[1].rsplit("</script>", 1)[0]
+    script = tmp_path / "inline.js"
+    script.write_text(inline, encoding="utf-8")
+    args = [NODE, str(DATA / "viewer_harness.js"), str(script)]
+    if site_dir is not None:
+        args.append(str(site_dir))
+    proc = subprocess.run(args, input=program, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+class _Elements(HTMLParser):
+    """Collect (tag, attrs) for every start tag."""
+
+    def __init__(self):
+        super().__init__()
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        self.found.append((tag, dict(attrs)))
+
+
+def _elements(html: str):
+    parser = _Elements()
+    parser.feed(html)
+    parser.close()
+    return parser.found
+
+
+ALLOWED_ATTRS = {"src", "alt", "loading", "href", "target", "rel", "class"}
+
+XSS_PAYLOADS = [
+    # Reviewer's repro: the link pass re-matched text inside the emitted <img src>.
+    "![a](http://x/[b](https://e onerror=location=this.title "
+    "title=javascript:alert%281%29 z) q)",
+    "[a](https://x/[b](https://e onerror=alert(1) z))",
+    # Inline code is a placeholder inside the URL / alt when tags are built.
+    '[a](https://x/`" onerror=alert(1) x`)',
+    '![`" onerror=alert(1) x`](https://x/y.png)',
+    # A forged placeholder in the input.
+    "\x00TG0\x00 [l](https://ok.example/) \x00IC0\x00",
+    "![q](https://x/y.png\" onerror=alert(1) x=\")",
+]
+
+
+@needs_node
+@pytest.mark.parametrize("kw", [DEFAULT_KW, STRICT_KW], ids=["default", "strict"])
+def test_js_markdown_payloads_cannot_inject_attributes(tmp_path, kw):
+    rendered = _run_viewer(
+        tmp_path, f"return {json.dumps(XSS_PAYLOADS)}.map(ctx.renderMarkdown);", **kw)
+    for payload, html in zip(XSS_PAYLOADS, rendered):
+        for tag, attrs in _elements(html):
+            assert set(attrs) <= ALLOWED_ATTRS, (payload, html)
+            assert all("<" not in (v or "") and '"' not in (v or "") for v in attrs.values()), \
+                (payload, html)
+            assert tag in {"p", "img", "a", "code", "br", "em", "strong"}, (payload, html)
+
+
+@needs_node
+@pytest.mark.parametrize("kw", [DEFAULT_KW, STRICT_KW], ids=["default", "strict"])
+def test_js_markdown_still_renders_plain_links_and_images(tmp_path, kw):
+    html = _run_viewer(
+        tmp_path,
+        'return ctx.renderMarkdown("[ok **bold**](https://e.com/a?x=1) ![pic](assets/p.png)");',
+        **kw)
+    els = _elements(html)
+    links = [a for t, a in els if t == "a"]
+    imgs = [a for t, a in els if t == "img"]
+    assert links and links[0]["href"] == "https://e.com/a?x=1"
+    assert links[0]["rel"] == "noopener noreferrer"
+    assert "<strong>bold</strong>" in html
+    expected_src = "../data/assets/p.png" if kw else "assets/p.png"
+    assert imgs and imgs[0]["src"] == expected_src
+
+
+@needs_node
+def test_js_local_media_url_rejects_traversal(tmp_path):
+    result = _run_viewer(tmp_path, r"""
+        return {
+          based: ctx.safeMediaUrl("../data/assets/../../etc/passwd"),
+          backslash: ctx.safeMediaUrl("assets/..\\x"),
+          encoded: ctx.safeMediaUrl("assets/%2E%2E/x"),
+          absolute: ctx.safeMediaUrl("assets//etc/x"),
+          rest: ctx.localMediaUrl("..\\x"),
+          ok: ctx.safeMediaUrl("assets/a/b.png"),
+          okBased: ctx.safeMediaUrl("../data/assets/a.png"),
+        };""", **STRICT_KW)
+    assert result == {"based": "", "backslash": "", "encoded": "", "absolute": "",
+                      "rest": "", "ok": "../data/assets/a/b.png",
+                      "okBased": "../data/assets/a.png"}
+
+
+@needs_node
+def test_js_strict_remote_image_becomes_link(tmp_path):
+    result = _run_viewer(tmp_path, """
+        return [
+          ctx.renderMedia({media_type: "image/png", url: "https://e.com/i.png", filename: "i.png"}),
+          ctx.renderMarkdown("![cat](https://e.com/c.png)"),
+        ];""", **STRICT_KW)
+    for html in result:
+        els = _elements(html)
+        assert not [t for t, _ in els if t in ("img", "video", "audio")], html
+        link = next(a for t, a in els if t == "a")
+        assert link["href"].startswith("https://e.com/")
+        assert link["rel"] == "noopener noreferrer"
+
+
+def _build_site(tmp_path: Path, chunk_bytes: int = 30000):
+    """A site dir holding a real gzipped 2000-row DB split into several chunks."""
+    db = tmp_path / "t.db"
+    con = sqlite3.connect(db)
+    con.execute("create table t(x)")
+    con.executemany("insert into t values (?)", [(os.urandom(50).hex(),) for _ in range(2000)])
+    con.commit()
+    con.close()
+    db_gz = tmp_path / "t.db.gz"
+    db_gz.write_bytes(gzip.compress(db.read_bytes()))
+    site = tmp_path / "site"
+    count = write_db_chunks(db_gz, site, chunk_bytes=chunk_bytes)
+    assert count >= 3
+    write_wasm_script(site)
+    copy_sql_js(site)
+    return site, count
+
+
+OPEN_DB = """
+    let rows = null;
+    ctx.onDbLoaded = () => { rows = ctx.query("select count(*) as n from t")[0].n; };
+    await ctx.initApp();
+    return {
+      rows,
+      notice: ctx.document.getElementById("drop-zone-notice").textContent,
+      wasmFreed: ctx.LLM_MEMEX_WASM_B64 === null,
+    };"""
+
+
+@needs_node
+def test_js_chunks_open_db(tmp_path):
+    site, count = _build_site(tmp_path)
+    result = _run_viewer(tmp_path, OPEN_DB, site_dir=site, db_chunks=count)
+    assert result == {"rows": 2000, "notice": "", "wasmFreed": True}
+
+
+@needs_node
+def test_js_missing_chunk_is_named(tmp_path):
+    site, count = _build_site(tmp_path)
+    result = _run_viewer(tmp_path, OPEN_DB, site_dir=site, db_chunks=count + 1)
+    assert result["rows"] is None
+    assert f"db/{count:03d}.js" in result["notice"]
+
+
+@needs_node
+def test_js_too_large_archive_shows_notice(tmp_path):
+    site, _ = _build_site(tmp_path)
+    result = _run_viewer(tmp_path, OPEN_DB, site_dir=site, db_chunks=0)
+    assert result["rows"] is None
+    assert "too large" in result["notice"]
+    assert "text/" in result["notice"] and "data/" in result["notice"]

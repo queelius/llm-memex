@@ -392,7 +392,7 @@ class TestHtmlRendering:
         """renderMarkdown should handle bold, italic, and bold+italic."""
         html = get_template()
         start = html.index("function renderMarkdown(")
-        chunk = html[start:start + 2500]
+        chunk = html[start:html.index("\n}\n", start)]  # the whole function
         assert "<strong>" in chunk
         assert "<em>" in chunk
 
@@ -400,7 +400,7 @@ class TestHtmlRendering:
         """renderMarkdown should handle markdown links and images."""
         html = get_template()
         start = html.index("function renderMarkdown(")
-        chunk = html[start:start + 2500]
+        chunk = html[start:html.index("\n}\n", start)]  # the whole function
         assert "<a href" in chunk
         assert "<img src" in chunk
 
@@ -408,7 +408,7 @@ class TestHtmlRendering:
         """renderMarkdown should handle unordered lists."""
         html = get_template()
         start = html.index("function renderMarkdown(")
-        chunk = html[start:start + 2500]
+        chunk = html[start:html.index("\n}\n", start)]  # the whole function
         assert "<li>" in chunk
         assert "<ul>" in chunk
 
@@ -416,14 +416,14 @@ class TestHtmlRendering:
         """renderMarkdown should handle horizontal rules."""
         html = get_template()
         start = html.index("function renderMarkdown(")
-        chunk = html[start:start + 2500]
+        chunk = html[start:html.index("\n}\n", start)]  # the whole function
         assert "<hr>" in chunk
 
     def test_render_markdown_code_block_protection(self):
         """renderMarkdown should protect code blocks from other transforms."""
         html = get_template()
         start = html.index("function renderMarkdown(")
-        chunk = html[start:start + 2500]
+        chunk = html[start:html.index("\n}\n", start)]  # the whole function
         # Uses placeholder pattern to protect code blocks
         assert "codeBlocks" in chunk
         assert "inlineCodes" in chunk
