@@ -1,6 +1,7 @@
 """Tests for memex importers: OpenAI, Anthropic, Gemini, Claude Code."""
 import pytest
 import json
+import os
 import math
 from datetime import datetime, timezone
 
@@ -2430,3 +2431,444 @@ class TestCodexTitlesAndSubagents:
         orphan = {c.id: c for c in codex_import(str(self._home(tmp_path)))}["orphan"]
         assert orphan.parent_conversation_id is None
         assert orphan.metadata["parent_thread_id"] == "pruned"
+
+
+# ── GitHub Copilot Chat (VS Code) ─────────────────────────────
+
+from llm_memex.importers import copilot_chat as cp_mod  # noqa: E402
+from llm_memex.importers.copilot_chat import detect as cp_detect  # noqa: E402
+from llm_memex.importers.copilot_chat import import_path as cp_import  # noqa: E402
+
+_CP_T0 = 1751385600000  # 2025-07-01T16:00:00Z, epoch ms
+
+
+def _cp_request(n, prompt, response, *, model=None, elapsed=5000, **extra):
+    req = {
+        "requestId": f"request_{n}",
+        "responseId": f"response_{n}",
+        "message": {"text": prompt, "parts": []},
+        "response": response,
+        "timestamp": _CP_T0 + n * 60000,
+        "agent": {"id": "github.copilot.editsAgent"},
+        "result": {"timings": {"totalElapsed": elapsed}},
+        "isCanceled": False,
+    }
+    if model:
+        req["modelId"] = model
+    req.update(extra)
+    return req
+
+
+def _cp_session(sid="sess-1", requests=None, **extra):
+    s = {
+        "version": 3,
+        "sessionId": sid,
+        "creationDate": _CP_T0 - 1000,
+        "lastMessageDate": _CP_T0 + 600000,
+        "initialLocation": "panel",
+        "responderUsername": "GitHub Copilot",
+        "requests": requests if requests is not None else [
+            _cp_request(0, "Why does the build fail?", [
+                {"value": "The build fails because ", "supportHtml": False},
+                {"kind": "inlineReference", "inlineReference": {"path": "/w/proj/setup.py", "scheme": "file"}},
+                {"value": " pins an old version."},
+                {"kind": "toolInvocationSerialized", "invocationMessage": {"value": "Reading"}},
+                {"kind": "prepareToolInvocation", "toolName": "copilot_readFile"},
+                {"value": "I fixed the pin."},
+            ], model="copilot/claude-sonnet-4.5"),
+            _cp_request(1, "Thanks", [{"value": "You're welcome."}]),
+        ],
+    }
+    s.update(extra)
+    return s
+
+
+def _cp_workspace(tmp_path, folder="file:///w/my%20proj"):
+    ws = tmp_path / "workspaceStorage" / "abc123"
+    (ws / "chatSessions").mkdir(parents=True)
+    (ws / "workspace.json").write_text(json.dumps({"folder": folder}))
+    return ws / "chatSessions"
+
+
+def _cp_write_json(d, session):
+    f = d / f"{session['sessionId']}.json"
+    f.write_text(json.dumps(session))
+    return f
+
+
+def _cp_write_log(d, sid, ops):
+    f = d / f"{sid}.jsonl"
+    f.write_text("".join(json.dumps(op) + "\n" for op in ops))
+    return f
+
+
+class TestCopilotChatDetect:
+    def test_detects_both_layouts_and_directories(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        j = _cp_write_json(d, _cp_session())
+        log = _cp_write_log(d, "s2", [{"kind": 0, "v": _cp_session("s2", [])}])
+        assert cp_detect(str(j)) and cp_detect(str(log))
+        assert cp_detect(str(tmp_path)) and cp_detect(str(d))
+
+    def test_rejects_other_files(self, tmp_path):
+        other = tmp_path / "conversations.json"
+        other.write_text(json.dumps([{"mapping": {}}]))
+        log = tmp_path / "x.jsonl"
+        log.write_text(json.dumps({"kind": 1, "k": ["a"], "v": 1}) + "\n")
+        cc = tmp_path / "cc.jsonl"
+        _write_jsonl(cc, [_cc_event("user", message={"role": "user", "content": "hi"})])
+        assert not any(cp_detect(str(f)) for f in (other, log, cc))
+        # Session-shaped files outside VS Code's session dirs are not scanned.
+        _cp_write_json(tmp_path, _cp_session())
+        assert not cp_detect(str(tmp_path))
+
+    def test_other_detectors_do_not_claim_sessions(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        j = _cp_write_json(d, _cp_session())
+        log = _cp_write_log(d, "s2", [{"kind": 0, "v": _cp_session("s2")}])
+        for f in (j, log):
+            for det in (openai_detect, anthropic_detect, gemini_detect,
+                        claude_code_detect, codex_detect):
+                assert not det(str(f))
+
+
+class TestCopilotChatImport:
+    def _conv(self, tmp_path, session=None):
+        d = _cp_workspace(tmp_path)
+        _cp_write_json(d, session or _cp_session())
+        convs = cp_import(str(tmp_path))
+        assert len(convs) == 1
+        return convs[0]
+
+    def test_conversation_skeleton(self, tmp_path):
+        conv = self._conv(tmp_path)
+        msgs = list(conv.messages.values())
+        assert [m.role for m in msgs] == ["user", "assistant", "user", "assistant"]
+        assert [m.parent_id for m in msgs] == [None] + [m.id for m in msgs[:-1]]
+        assert msgs[0].get_text() == "Why does the build fail?"
+        assert conv.id == "sess-1" and conv.source == "copilot" and conv.tags == ["copilot"]
+        assert msgs[0].id == "sess-1:request_0" and msgs[1].id == "sess-1:response_0"
+
+    def test_inline_parts_join_and_other_parts_break_paragraphs(self, tmp_path):
+        text = list(self._conv(tmp_path).messages.values())[1].get_text()
+        assert text == ("The build fails because `setup.py` pins an old version."
+                        "\n\nI fixed the pin.")
+
+    def test_markdown_content_and_vuln_parts_are_text(self, tmp_path):
+        session = _cp_session(requests=[_cp_request(0, "q", [
+            {"kind": "markdownContent", "content": {"value": "Use "}},
+            {"kind": "markdownVuln", "content": {"value": "env vars"}, "vulnerabilities": []},
+            {"kind": "inlineReference", "inlineReference": {"uri": {"path": "/a/b.py"}, "range": {}},
+             "name": "helper"},
+            {"kind": "thinking", "value": "hidden"},
+        ])])
+        msgs = list(self._conv(tmp_path, session).messages.values())
+        assert msgs[1].get_text() == "Use env vars`helper`"
+
+    def test_timestamps_model_and_message_metadata(self, tmp_path):
+        msgs = list(self._conv(tmp_path).messages.values())
+        assert msgs[0].created_at == datetime(2025, 7, 1, 16, 0, tzinfo=timezone.utc)
+        assert msgs[1].created_at == datetime(2025, 7, 1, 16, 0, 5, tzinfo=timezone.utc)
+        assert msgs[1].model == "copilot/claude-sonnet-4.5"
+        assert msgs[1].metadata["agent"] == "github.copilot.editsAgent"
+
+    def test_conversation_metadata_and_provenance(self, tmp_path):
+        conv = self._conv(tmp_path)
+        assert conv.title == "Why does the build fail?"
+        assert conv.model == "copilot/claude-sonnet-4.5"
+        assert conv.created_at == datetime(2025, 7, 1, 15, 59, 59, tzinfo=timezone.utc)
+        assert conv.updated_at == datetime(2025, 7, 1, 16, 10, tzinfo=timezone.utc)
+        assert conv.metadata["workspace"] == "file:///w/my%20proj"
+        assert conv.metadata["cwd"] == "/w/my proj"
+        assert conv.metadata["session_version"] == 3
+        assert conv.metadata["importer_mode"] == "conversation_only"
+        prov = conv.metadata["_provenance"]
+        assert prov == {"source_type": "copilot_chat", "source_file": prov["source_file"],
+                        "source_id": "sess-1", "source_format": "vscode-chat-session/1"}
+
+    def test_custom_title_wins(self, tmp_path):
+        assert self._conv(tmp_path, _cp_session(customTitle="Build fix")).title == "Build fix"
+
+    def test_remote_workspace_has_no_cwd(self, tmp_path):
+        d = _cp_workspace(tmp_path, folder="vscode-remote://ssh-remote%2Bhost/c%3A/p")
+        _cp_write_json(d, _cp_session())
+        conv = cp_import(str(tmp_path))[0]
+        assert conv.metadata["workspace"].startswith("vscode-remote://")
+        assert "cwd" not in conv.metadata
+
+    def test_canceled_and_failed_responses(self, tmp_path):
+        session = _cp_session(requests=[
+            _cp_request(0, "a", [{"value": "partial"}], isCanceled=True),
+            _cp_request(1, "b", [], result={"errorDetails": {"message": "rate limited"}}),
+        ])
+        msgs = list(self._conv(tmp_path, session).messages.values())
+        assert [m.role for m in msgs] == ["user", "assistant", "user"]
+        assert msgs[1].metadata["canceled"] is True
+
+    def test_empty_sessions_are_skipped(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        _cp_write_json(d, _cp_session("empty", requests=[]))
+        assert cp_import(str(tmp_path)) == []
+
+
+class TestCopilotChatOperationLog:
+    def test_replays_set_push_truncate_and_delete(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        base = _cp_session("s-log", requests=[])
+        ops = [
+            {"kind": 0, "v": base},
+            {"kind": 2, "k": ["requests"], "v": [_cp_request(0, "first", [{"value": "one"}])]},
+            {"kind": 2, "k": ["requests"], "v": [_cp_request(1, "dropped", [])]},
+            # Truncate to 1, then push the replacement second request.
+            {"kind": 2, "k": ["requests"], "v": [_cp_request(1, "second", [])], "i": 1},
+            {"kind": 2, "k": ["requests", 1, "response"], "v": [{"value": "two"}]},
+            {"kind": 1, "k": ["customTitle"], "v": "Logged"},
+            {"kind": 3, "k": ["responderUsername"]},
+        ]
+        _cp_write_log(d, "s-log", ops)
+        conv = cp_import(str(tmp_path))[0]
+        assert [m.get_text() for m in conv.messages.values()] == ["first", "one", "second", "two"]
+        assert conv.title == "Logged"
+        assert "responder" not in conv.metadata
+        assert conv.metadata["_provenance"]["source_format"] == "vscode-chat-session/2"
+
+    def test_push_truncate_without_items(self, tmp_path):
+        state = {"a": [1, 2, 3]}
+        cp_mod._apply(state, {"kind": 2, "k": ["a"], "i": 1})
+        assert state == {"a": [1]}
+
+    def test_torn_last_line_is_tolerated(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        f = _cp_write_log(d, "s", [{"kind": 0, "v": _cp_session("s")}])
+        with open(f, "a") as fh:
+            fh.write('{"kind": 1, "k": ["custo')
+        assert len(cp_import(str(tmp_path))) == 1
+
+    @pytest.mark.parametrize("bad", [
+        [{"kind": 9, "k": ["x"]}],                       # unknown operation kind
+        ["not json", {"kind": 1, "k": ["customTitle"], "v": "x"}],  # corrupt middle line
+        [{"kind": 1, "k": ["requests", 7, "x"], "v": 1}],  # path does not exist
+    ])
+    def test_unreplayable_log_skips_only_that_session(self, tmp_path, bad):
+        d = _cp_workspace(tmp_path)
+        f = d / "bad.jsonl"
+        lines = [json.dumps({"kind": 0, "v": _cp_session("bad")})]
+        lines += [x if isinstance(x, str) else json.dumps(x) for x in bad]
+        f.write_text("\n".join(lines) + "\n")
+        _cp_write_json(d, _cp_session("good"))
+        assert [c.id for c in cp_import(str(tmp_path))] == ["good"]
+
+
+class TestCopilotChatDuplicates:
+    def _touch(self, f, seconds):
+        os.utime(f, (seconds, seconds))
+
+    def test_latest_last_message_date_wins_over_more_requests(self, tmp_path):
+        # The user deleted a turn: the current copy has fewer requests.
+        d = _cp_workspace(tmp_path)
+        full = _cp_session("dup")
+        _cp_write_json(d, full)
+        current = _cp_session("dup", requests=full["requests"][:1],
+                              lastMessageDate=full["lastMessageDate"] + 1)
+        _cp_write_log(d, "dup", [{"kind": 0, "v": current}])
+        convs = cp_import(str(tmp_path))
+        assert len(convs) == 1 and convs[0].message_count == 2
+
+    def test_tie_goes_to_the_most_recently_written_file(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        full = _cp_session("dup")
+        old = _cp_write_json(d, _cp_session("dup", requests=full["requests"][:1]))
+        new = _cp_write_log(d, "dup", [{"kind": 0, "v": full}])
+        self._touch(old, 2_000_000_000)
+        self._touch(new, 1_000_000_000)
+        assert cp_import(str(tmp_path))[0].message_count == 2
+        self._touch(new, 2_000_000_001)
+        assert cp_import(str(tmp_path))[0].message_count == 4
+
+    def test_single_file_import_reads_every_copy_under_user_dir(self, tmp_path):
+        current_dir = _cp_workspace(tmp_path)
+        full = _cp_session("dup", lastMessageDate=_CP_T0 + 999999)
+        _cp_write_json(current_dir, full)
+        migrated = tmp_path / "workspaceStorage" / "zzz" / "chatSessions"
+        migrated.mkdir(parents=True)
+        stale = _cp_write_json(migrated, _cp_session("dup", requests=full["requests"][:1]))
+        convs = cp_import(str(stale))
+        assert len(convs) == 1 and convs[0].message_count == 4
+        assert cp_import(str(migrated))[0].message_count == 4
+
+    def test_cleared_current_copy_imports_nothing(self, tmp_path):
+        d = _cp_workspace(tmp_path)
+        _cp_write_json(d, _cp_session("dup"))
+        _cp_write_log(d, "dup", [{"kind": 0, "v": _cp_session(
+            "dup", requests=[], lastMessageDate=_CP_T0 + 999999)}])
+        assert cp_import(str(tmp_path)) == []
+
+
+class TestCopilotChatReplayEdgeCases:
+    """JavaScript semantics of VS Code's reader that Python indexing lacks."""
+
+    def test_string_array_index(self):
+        state = {"requests": [{"response": []}]}
+        cp_mod._apply(state, {"kind": 2, "k": ["requests", "0", "response"], "v": [1]})
+        assert state == {"requests": [{"response": [1]}]}
+
+    def test_set_past_the_end_grows_the_array(self):
+        state = {"a": []}
+        cp_mod._apply(state, {"kind": 1, "k": ["a", 1], "v": "x"})
+        assert state == {"a": [None, "x"]}
+
+    def test_integral_float_truncation(self):
+        state = {"a": [1, 2, 3]}
+        cp_mod._apply(state, {"kind": 2, "k": ["a"], "v": [4], "i": 1.0})
+        assert state == {"a": [1, 4]}
+
+    @pytest.mark.parametrize("op", [
+        {"kind": 2, "k": ["a"], "i": -1},
+        {"kind": 2, "k": ["a"], "i": 1.5},
+        {"kind": 9, "k": []},
+        {"kind": 1, "k": ["a", "x"], "v": 1},
+    ])
+    def test_invalid_operations_raise(self, op):
+        with pytest.raises(ValueError):
+            cp_mod._apply({"a": [1]}, op)
+
+    def test_fallback_ids_use_the_request_timestamp(self, tmp_path):
+        req = _cp_request(0, "q", [{"value": "a"}])
+        del req["requestId"], req["responseId"]
+        d = _cp_workspace(tmp_path)
+        _cp_write_json(d, _cp_session(requests=[req]))
+        ids = list(cp_import(str(tmp_path))[0].messages)
+        assert ids == [f"sess-1:t{_CP_T0}", f"sess-1:t{_CP_T0}:response"]
+
+    def test_updated_at_includes_a_response_finishing_late(self, tmp_path):
+        req = _cp_request(0, "q", [{"value": "a"}], elapsed=3_600_000)
+        d = _cp_workspace(tmp_path)
+        _cp_write_json(d, _cp_session(requests=[req], lastMessageDate=_CP_T0))
+        conv = cp_import(str(tmp_path))[0]
+        assert conv.updated_at == datetime(2025, 7, 1, 17, 0, tzinfo=timezone.utc)
+
+
+# ── Claude Code prompt history (~/.claude/history.jsonl) ──────
+
+from llm_memex.importers import claude_code_history as hist_mod  # noqa: E402
+from llm_memex.importers.claude_code_history import detect as hist_detect  # noqa: E402
+from llm_memex.importers.claude_code_history import import_path as hist_import  # noqa: E402
+
+_H_T0 = 1759000000000  # 2025-09-27T19:06:40Z, epoch ms
+
+
+def _h(display, offset_s=0, project="/w/proj", session=None, pasted=None):
+    rec = {"display": display, "pastedContents": pasted or {},
+           "timestamp": _H_T0 + offset_s * 1000, "project": project}
+    if session:
+        rec["sessionId"] = session
+    return rec
+
+
+def _h_write(tmp_path, records):
+    f = tmp_path / "history.jsonl"
+    _write_jsonl(f, records)
+    return f
+
+
+class TestClaudeCodeHistoryDetect:
+    def test_detects_file_and_directory(self, tmp_path):
+        f = _h_write(tmp_path, [_h("hi")])
+        assert hist_detect(str(f)) and hist_detect(str(tmp_path))
+
+    def test_rejects_transcripts_and_others(self, tmp_path):
+        cc = tmp_path / "s.jsonl"
+        _write_jsonl(cc, [_cc_event("user", message={"role": "user", "content": "hi"})])
+        cx = _cx_write(tmp_path / "r.jsonl", _cx_v2_session())
+        assert not hist_detect(str(cc)) and not hist_detect(str(cx))
+
+    def test_other_detectors_do_not_claim_history(self, tmp_path):
+        f = _h_write(tmp_path, [_h("hi", session="s1")])
+        for det in (claude_code_detect, claude_code_full_detect, codex_detect, cp_detect):
+            assert not det(str(f))
+
+
+class TestClaudeCodeHistoryImport:
+    def test_groups_by_session_and_by_project_day(self, tmp_path):
+        f = _h_write(tmp_path, [
+            _h("old one", 0),
+            _h("other project", 5, project="/w/other"),
+            _h("old two", 60),
+            _h("next day", 86400),
+            _h("in session", 90000, session="sess-a"),
+            _h("again", 90060, session="sess-a"),
+        ])
+        convs = {c.id: c for c in hist_import(str(f))}
+        h = hist_mod.hashlib.sha256(b"/w/proj").hexdigest()[:12]
+        assert set(convs) == {
+            f"history:{h}:2025-09-27", f"history:{h}:2025-09-28",
+            "history:" + hist_mod.hashlib.sha256(b"/w/other").hexdigest()[:12] + ":2025-09-27",
+            "history:sess-a",
+        }
+        day = convs[f"history:{h}:2025-09-27"]
+        assert [m.get_text() for m in day.messages.values()] == ["old one", "old two"]
+        assert day.metadata["grouping"] == "project-day"
+        assert day.metadata["_provenance"]["source_format"] == "claude-code-history/1"
+        sess = convs["history:sess-a"]
+        assert sess.metadata["session_id"] == "sess-a" and sess.metadata["grouping"] == "session"
+        assert sess.metadata["_provenance"]["source_format"] == "claude-code-history/2"
+        assert sess.metadata["_provenance"]["source_id"] == "sess-a"
+
+    def test_messages_are_a_user_chain_with_timestamp_ids(self, tmp_path):
+        f = _h_write(tmp_path, [_h("a", 0, session="s"), _h("b", 1, session="s"),
+                                _h("c", 1, session="s")])
+        conv = hist_import(str(f))[0]
+        msgs = list(conv.messages.values())
+        assert all(m.role == "user" for m in msgs)
+        assert [m.parent_id for m in msgs] == [None, msgs[0].id, msgs[1].id]
+        assert [m.id for m in msgs] == [f"history:s:{_H_T0}", f"history:s:{_H_T0 + 1000}",
+                                        f"history:s:{_H_T0 + 1000}~2"]
+        assert msgs[0].created_at == datetime(2025, 9, 27, 19, 6, 40, tzinfo=timezone.utc)
+        assert conv.updated_at == datetime(2025, 9, 27, 19, 6, 41, tzinfo=timezone.utc)
+
+    def test_metadata_title_and_source(self, tmp_path):
+        f = _h_write(tmp_path, [_h("/clear", 0, session="s"), _h("Refactor the parser\nplease", 1, session="s")])
+        conv = hist_import(str(f))[0]
+        assert conv.title == "Refactor the parser"
+        assert conv.source == "claude_code"
+        assert conv.tags == ["claude-code", "prompt-history"]
+        assert conv.metadata["importer_mode"] == "prompt_history"
+        assert conv.metadata["cwd"] == "/w/proj"
+
+    def test_pasted_text_inline_and_from_cache(self, tmp_path):
+        (tmp_path / "paste-cache").mkdir()
+        (tmp_path / "paste-cache" / "abc.txt").write_text("cached paste")
+        f = _h_write(tmp_path, [_h("[Pasted text #1] and [Pasted text #2]", session="s", pasted={
+            "2": {"id": 2, "type": "text", "contentHash": "abc"},
+            "1": {"id": 1, "type": "text", "content": "inline paste"},
+            "3": {"id": 3, "type": "text", "contentHash": "gone"},
+            "4": {"id": 4, "type": "text", "contentHash": "../escape"},
+        })])
+        msg = next(iter(hist_import(str(f))[0].messages.values()))
+        assert [b["text"] for b in msg.content] == [
+            "[Pasted text #1] and [Pasted text #2]", "inline paste", "cached paste"]
+
+    def test_several_files_are_one_union(self, tmp_path):
+        _h_write(tmp_path, [_h("a", 0, session="s"), _h("b", 1, session="s")])
+        _write_jsonl(tmp_path / "history-backup.jsonl", [_h("a", 0, session="s")])
+        convs = hist_import(str(tmp_path))
+        assert len(convs) == 1
+        assert [m.get_text() for m in convs[0].messages.values()] == ["a", "b"]
+
+    def test_detects_past_a_leading_unknown_record(self, tmp_path):
+        f = tmp_path / "history.jsonl"
+        f.write_text("{bad\n" + json.dumps({"type": "future"}) + "\n"
+                     + json.dumps(_h("hi", session="s")) + "\n")
+        assert hist_detect(str(f)) and hist_detect(str(tmp_path))
+        assert len(hist_import(str(f))) == 1
+
+    def test_empty_and_malformed_lines_are_skipped(self, tmp_path):
+        f = tmp_path / "history.jsonl"
+        f.write_text("\n".join([
+            json.dumps(_h("kept", session="s")),
+            json.dumps(_h("", 1, session="s")),
+            "{not json",
+            json.dumps({"display": "no project", "timestamp": _H_T0}),
+        ]) + "\n")
+        convs = hist_import(str(f))
+        assert len(convs) == 1 and convs[0].message_count == 1

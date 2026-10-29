@@ -9,23 +9,24 @@ This repo (`llm-memex/`) is one archive in the `*-memex` ecosystem at `~/github/
 ## Commands
 
 ```bash
-# Install in development mode
+# Install in development mode. The live runtime is the shared ~/.venvs/memex
+# (see ../CLAUDE.md); after adding a dependency, reinstall there too:
+#   VIRTUAL_ENV=~/.venvs/memex uv pip install -e .
 pip install -e ".[dev]"
 
-# Run tests (coverage is enabled by default via pytest.ini)
-pytest tests/llm_memex/ -v
+# Run tests (pytest.ini already adds -v and --cov=llm_memex --cov-report=term-missing)
+pytest
 
-# Run a single test file or test
-pytest tests/llm_memex/test_db.py -v
-pytest tests/llm_memex/test_db.py::TestDatabase::test_save_and_load -v
-
-# Run with explicit coverage report
-pytest tests/llm_memex/ --cov=llm_memex --cov-report=term-missing
+# Run a single test file or test (add --no-cov to skip the coverage report)
+pytest tests/llm_memex/test_db.py
+pytest tests/llm_memex/test_db.py::TestDatabase::test_save_and_load --no-cov
 
 # CLI
 llm-memex import conversations.json                   # auto-detect format
 llm-memex import ~/.claude/projects/ -r               # recursive directory import
 llm-memex import ~/.codex/sessions/                   # Codex CLI sessions (threads assembled across files)
+llm-memex import ~/.claude/history.jsonl              # Claude Code prompt history (user side only)
+llm-memex import ~/.config/Code/User                  # VS Code Copilot Chat sessions
 llm-memex import file.json --format openai            # force format
 llm-memex show                                        # list conversations
 llm-memex show <id>                                   # view conversation
@@ -59,7 +60,7 @@ llm_memex/
   models.py            # ContentBlock, Message, Conversation (tree)
   db.py                # Database (raw sqlite3, WAL, FTS5, migrations, schema v8)
   config.py            # YAML config, DatabaseRegistry (multi-database support)
-  mcp.py               # FastMCP server (6 tools, 2 resources)
+  mcp.py               # FastMCP server (7 tools, 2 resources)
   assets.py            # Asset resolution, copying, media markdown rendering
   cli.py               # argparse CLI (import, export, show, mcp, run)
   scripts/
@@ -74,6 +75,9 @@ llm_memex/
     claude_code.py          # Claude Code JSONL (conversation_only mode)
     claude_code_full.py     # Claude Code JSONL (full fidelity: tool_use, thinking, tool_result)
     codex.py                # Codex CLI rollout JSONL (conversation_only; layouts codex-rollout/1 and /2)
+    claude_code_history.py  # ~/.claude/history.jsonl prompts (prompt_history; claude-code-history/1 and /2)
+    copilot_chat.py         # VS Code Copilot Chat sessions (conversation_only; vscode-chat-session/1 and /2)
+    arkiv.py                # llm-memex arkiv bundles (round-trip from the SPA's "download arkiv"; `--merge`)
   exporters/           # Convention-based: export()
     markdown.py, json_export.py, arkiv_export.py
     html.py              # HTML SPA exporter (directory: index.html + DB + assets)
@@ -111,6 +115,7 @@ Schema migrations: v1→v2 (enrichments, provenance) → v3 (parent_conversation
 
 | Tool | Purpose |
 |---|---|
+| `get_record_kinds` | C11 record-kind declaration (`{kinds: [{kind, table, id_column}]}`) from `RECORD_KINDS`; federation conformance judges C1 soft delete against these tables only. |
 | `execute_sql` | Primary read interface for arbitrary SQL. Schema available via `llm-memex://schema`. |
 | `get_conversation` | Tree-aware retrieval + export (3 modes: metadata, messages, export) |
 | `get_conversations` | Bulk retrieval with filters (ids, tag, source, model, search, starred, pinned) and optional full messages. Collapses the N+1 of execute_sql + get_conversation x N. |
@@ -136,7 +141,8 @@ WHERE notes_fts MATCH 'query'
 
 ## Testing
 
-- Tests in `tests/llm_memex/` organized by module: `test_db.py`, `test_mcp.py`, `test_cli.py`, `test_importers.py`, `test_exporters.py`, `test_models.py`, `test_notes.py`, `test_graph.py`, `test_redact.py`, `test_scripts.py`, `test_assets.py`, `test_config.py`, `test_html_export.py`, `test_integration.py`
+- Tests in `tests/llm_memex/`, one `test_<module>.py` per module, plus `test_integration.py` and `test_arkiv_roundtrip.py` (export → SPA-shaped arkiv → `--merge`)
+- `pytest.ini` takes precedence over `[tool.pytest.ini_options]` in `pyproject.toml`, so pytest ignores the pyproject section (including its `asyncio_mode`). Change test config in `pytest.ini`
 - `conftest.py` provides `tmp_db_path` fixture
 - Server tests exercise DB methods directly; `create_server(db=db, sql_write=...)` controls only raw `execute_sql` writes. Structured write tools work on any writable `Database`; test their refusal path with `Database(path, readonly=True)`
 - `_get_tool_fn(server, name)` extracts the underlying function from FastMCP for direct invocation in tests
@@ -172,11 +178,15 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 - Two Claude Code importers share `_claude_code_common.py`: `claude_code` (conversation_only, strips tool use/thinking) and `claude_code_full` (full fidelity). Both use `source="claude_code"`, differentiated by `importer_mode` metadata and provenance `source_type`
 - `codex` imports only `response_item` messages (user/assistant). `event_msg` is a UI event stream that repeats the transcript (read only for its record of submitted user messages), and `developer` messages are instructions. A user text part is client-generated context when it has the block shape (optional heading line, `<name ...>` + newline, balanced `</name>` at the end: covers environment, AGENTS.md, plugin hints) AND, where the segment has a UI user stream, it is absent from it (so wrapped answers to agent questions stay). Records are streamed: rollout files reach 2 GB
 - `codex` split threads: a thread spanning several rollout files is one conversation. A later file's opening `session_meta` ordinal is a fork point (its records reuse ordinals with different content), so it becomes a branch parented on the last message before the fork; message ids are `<thread>:<segment session_meta timestamp>:o<ordinal>` (or `l<line>` without ordinals). Importing one file or a subdirectory still assembles each thread from every segment under the Codex home, so a partial import never replaces a thread with part of itself. One failing thread is logged and skipped, never fatal to the batch. `save_conversation` keeps an existing `parent_conversation_id` when the importer supplies NULL (parent file pruned). Subagent threads link to their parent via `parent_conversation_id` only when the parent is in the same import (FK); `metadata.parent_thread_id` always records it. Titles: `session_index.jsonl` name, else first human message, else `Subagent <nickname> (<role>)`
+- `claude_code_history` reads the prompt log Claude Code never prunes, so it is the only record of sessions whose transcripts are gone. User messages only. Entries carry `sessionId` from about 2025-11 (layout `/2`, grouped per session, id `history:<sessionId>`); older entries (layout `/1`) are grouped by project and UTC day (id `history:<sha256(project)[:12]>:<date>`). The `history:` prefix keeps these from ever replacing a transcript conversation, whose id is the bare session id; `metadata.session_id` links them. Pasted text follows `display` as extra text blocks, inline or from `paste-cache/<contentHash>.txt` (missing cache files are counted). Several history files in one directory import as a union with exact-duplicate entries dropped (so a backup copy beside the live file cannot overwrite it). Detection looks at the first 10 records, not just the first, and for a directory checks only its top level, so pointing at `~/.claude` does not scan every transcript
+- `copilot_chat` reads VS Code's `chatSessions/` and `emptyWindowChatSessions/` dirs (a directory import looks only inside those, since `workspaceStorage` holds other large JSON). Layout `/1` is a `.json` snapshot; `/2` is a `.jsonl` operation log replayed with VS Code's own rules (0 snapshot, 1 set, 2 push with optional truncate `i`, 3 delete); an unknown op kind or a corrupt middle line rejects that session only, a torn last line is dropped. One session can exist as both `<id>.json` and `<id>.jsonl` (and as migrated copies), so sessions are deduplicated by id: latest `lastMessageDate` wins, then the most recently written file (never "most requests": a deleted turn must stay deleted). Importing part of the storage (one file, one workspace) also reads every copy of its sessions under the VS Code `User` dir, like Codex thread assembly. The replay follows JS semantics (`"0"` indexes an array, setting past the end grows it, a truncation length must be a non-negative integer). Response parts: markdown, `inlineReference` (rendered as `` `name` ``) and `markdownVuln` are inline text; any other part is counted and becomes a paragraph break. Workspace comes from the sibling `workspace.json` (`metadata.workspace` URI, plus `cwd` for a local folder). Model is the request's `modelId`, absent before late 2025
 - `claude_code_full` imports subagent files from `subagents/` directories with `parent_conversation_id` links; subagent IDs are `{sessionId}:{agentId}` (deterministic); `conversation_only` skips subagents entirely
 - FTS5 is NOT trigger-maintained: `messages_fts` is manually updated in `save_conversation`, `append_message`, `update_message_content`, `delete_conversation`. `notes_fts` is maintained by `add_note`, `update_note`, `delete_note`, and `delete_conversation` (which re-syncs the shadow rows of notes orphaned by `ON DELETE SET NULL` so they no longer point at the deleted conversation)
 - HTML SPA search uses `LIKE '%term%'` on raw `messages.content` JSON (no FTS5 in sql.js)
 - Redact script scans only `type="text"` content blocks; tool_use/thinking blocks in full-fidelity imports are not scanned
 - MCP lifespan resolution: `MEMEX_CONFIG` env var, then `~/.memex/config.yaml`, then fallback to `~/.memex/default`
+- The repo's `.mcp.json` registers `llm-memex-lab-rat`: this working tree's code (via the `~/.venvs/memex` editable install) serving the user's **live** `~/.memex/config.yaml` databases. It is how to exercise uncommitted MCP changes against real data, and its structured write tools write to the real archive
+- `dev/` (gitignored) holds real ChatGPT/Claude platform exports used as importer sample data. It is private: never commit it, quote it in fixtures, or hand it to an external reviewer
 - Enrichment type `original_content` used by redact script is not validated by MCP (DB layer has no type constraints)
 - `update_conversations` fails fast on readonly databases before entering the bulk loop
 - **`archived_at` is a visible user flag here, not a default read filter (intentional C1 deviation).** Like `starred_at` and `pinned_at`, it is a boolean timestamp (NULL=false, DATETIME=true) the user toggles for organization. Default local reads (`query_conversations`, the `get_conversations` MCP tool, `show`) intentionally include archived conversations so the user can still see and manage them. The soft-delete privacy guarantee is enforced on the *publish/export* paths instead: the HTML and arkiv exporters default to `include_archived=False`, so archived conversations never travel in a published bundle unless the caller explicitly opts in. If a future change wants archived hidden from default reads too, add an `include_archived` flag rather than silently flipping the default.

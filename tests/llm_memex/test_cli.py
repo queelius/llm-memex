@@ -253,6 +253,52 @@ class TestCLIImportCodex:
         assert "2 unchanged" in second.stdout
 
 
+
+class TestCLIImportCopilotAndHistory:
+    """Both new importers end to end: autodetected, saved, a no-op re-import."""
+
+    def _run(self, src, db_dir):
+        return subprocess.run(
+            [sys.executable, "-m", "llm_memex", "import", str(src), "--db", str(db_dir)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def test_copilot_chat_workspace_storage(self, tmp_path):
+        from llm_memex.db import Database
+        sessions = tmp_path / "User" / "workspaceStorage" / "h1" / "chatSessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s1.json").write_text(json.dumps({
+            "version": 3, "sessionId": "s1", "creationDate": 1751385600000,
+            "lastMessageDate": 1751385660000, "requests": [{
+                "requestId": "r1", "responseId": "p1", "timestamp": 1751385600000,
+                "message": {"text": "hello copilot"}, "response": [{"value": "hi"}],
+            }],
+        }))
+        db_dir = tmp_path / "db"
+        assert "Imported 1 conversation(s)" in self._run(tmp_path / "User", db_dir)
+        assert "1 unchanged" in self._run(tmp_path / "User", db_dir)
+        with Database(str(db_dir)) as db:
+            prov = db.get_provenance("s1")[0]
+            assert db.load_conversation("s1").source == "copilot"
+        assert prov["importer_version"].startswith("copilot_chat@")
+        assert prov["source_format"] == "vscode-chat-session/1"
+
+    def test_claude_code_history_file(self, tmp_path):
+        from llm_memex.db import Database
+        hist = tmp_path / "history.jsonl"
+        hist.write_text(json.dumps({
+            "display": "fix the test", "pastedContents": {},
+            "timestamp": 1762024328263, "project": "/w", "sessionId": "abc",
+        }) + "\n")
+        db_dir = tmp_path / "db"
+        assert "Imported 1 conversation(s)" in self._run(hist, db_dir)
+        assert "1 unchanged" in self._run(hist, db_dir)
+        with Database(str(db_dir)) as db:
+            prov = db.get_provenance("history:abc")[0]
+        assert prov["importer_version"].startswith("claude_code_history@")
+        assert prov["source_format"] == "claude-code-history/2"
+
+
 class TestCLIImportRecursive:
     """Tests for memex import --recursive directory import."""
 

@@ -1,6 +1,6 @@
 # llm-memex
 
-Personal conversation knowledge base. Import, search, and analyze conversations from ChatGPT, Claude, Gemini, Claude Code, and Codex. MCP-first for LLM agent access.
+Personal conversation knowledge base. Import, search, and analyze conversations from ChatGPT, Claude, Gemini, Claude Code, Codex, and GitHub Copilot Chat. MCP-first for LLM agent access.
 
 ## Install
 
@@ -22,6 +22,8 @@ pip install -e ".[dev]"
 llm-memex import conversations.json          # auto-detects format
 llm-memex import ~/.claude/projects/          # directory of Claude Code sessions
 llm-memex import ~/.codex/sessions/           # directory of Codex CLI sessions
+llm-memex import ~/.claude/history.jsonl      # Claude Code prompt history (survives transcript pruning)
+llm-memex import ~/.config/Code/User          # VS Code Copilot Chat sessions
 llm-memex import export.json --format openai  # force format
 ```
 
@@ -68,6 +70,8 @@ llm-memex run enrich_trivial --apply
 | Claude Code           | Yes    | -      | JSONL, conversation-only mode |
 | Claude Code (full)    | Yes    | -      | Full fidelity: tool_use, thinking, subagents |
 | Codex CLI             | Yes    | -      | Rollout JSONL (both layouts), conversation-only; split threads become branches, subagents linked to parents |
+| Claude Code history   | Yes    | -      | `~/.claude/history.jsonl`: the user's prompts only, grouped by session (or project and day before session ids existed) |
+| GitHub Copilot Chat   | Yes    | -      | VS Code chat sessions (JSON snapshots and JSONL operation logs), conversation-only |
 | Markdown              | -      | Yes    | |
 | JSON                  | -      | Yes    | |
 | HTML (SPA)            | -      | Yes    | Self-contained, light/dark, librarian chat |
