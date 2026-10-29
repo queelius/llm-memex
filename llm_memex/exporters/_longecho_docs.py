@@ -10,6 +10,7 @@ the other parts of the folder are built.
 import hashlib
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
@@ -19,6 +20,7 @@ import yaml
 GENERATOR_PREFIX = "llm-memex longecho"
 SUMS_NAME = "SHA256SUMS"
 README_NAME = "README.md"
+_SUMS_TMP_NAME = f".{SUMS_NAME}.tmp"
 
 _HASH_CHUNK = 1024 * 1024  # 1 MB reads, so a multi-GB database never loads at once
 _SHA256_HEX_LEN = 64
@@ -193,11 +195,12 @@ def _root_body(summary: ArchiveSummary) -> str:
                     f"and {_count(summary.messages, 'message')}")
         if summary.sources:
             sentence += f" from these sources: {', '.join(summary.sources)}"
-        span = _date_range(summary)
-        if span:
-            sentence += f". The oldest conversation began on {summary.first}"
-            if summary.first != summary.last:
-                sentence += f" and the newest on {summary.last}"
+        if summary.first is not None and summary.last is not None:
+            if summary.first == summary.last:
+                sentence += f". All of it is from {summary.first}"
+            else:
+                sentence += (f". The oldest conversation began on {summary.first} "
+                             f"and the newest on {summary.last}")
         add(sentence + ".")
     add("")
     add(f"Exported on {summary.exported_at}.")
@@ -208,7 +211,8 @@ def _root_body(summary: ArchiveSummary) -> str:
 
     add("## How to open it")
     add("")
-    add("Start with the first option; each one needs less than the next.")
+    add("Start with the first option. Each later option needs more tools than the "
+        "one before it.")
     add("")
     add("1. **Read it in a text editor.** The `text/` folder has one Markdown "
         "file (a plain text file) for every conversation, grouped by year. "
@@ -254,7 +258,9 @@ def _root_body(summary: ArchiveSummary) -> str:
         add("- Archived conversations (ones the owner had set aside) are left out "
             "and appear nowhere in this folder, including the counts above.")
     if summary.include_notes:
-        add("- Notes the owner attached to conversations are included.")
+        add("- Notes the owner attached to conversations are included. You will "
+            "find them as quoted notes in the `text/` files and in the "
+            "`notes` table of the database.")
     else:
         add("- Notes the owner attached to conversations are left out.")
     add("- The database's full-text search index is not included. It is large, it "
@@ -345,7 +351,8 @@ def write_sha256sums(out_dir: Path) -> None:
     """Write ``SHA256SUMS`` (sha256sum format) for every regular file under *out_dir*.
 
     Symlinks are neither followed nor listed, so nothing outside *out_dir* can
-    be hashed or later deleted on its behalf. ``SHA256SUMS`` itself is excluded.
+    be hashed or later deleted on its behalf. ``SHA256SUMS`` itself (and the
+    temp file used to write it) is excluded.
     """
     out_dir = Path(out_dir)
     entries: List[Tuple[str, Path]] = []
@@ -355,7 +362,7 @@ def write_sha256sums(out_dir: Path) -> None:
             if full.is_symlink() or not full.is_file():
                 continue
             rel = full.relative_to(out_dir).as_posix()
-            if rel != SUMS_NAME:
+            if rel not in (SUMS_NAME, _SUMS_TMP_NAME):  # a stale temp of ours
                 entries.append((rel, full))
     entries.sort(key=lambda entry: entry[0])
 
@@ -366,7 +373,7 @@ def write_sha256sums(out_dir: Path) -> None:
         lines.append(f"{prefix}{_hash_file(full)}  {name}\n")
 
     # Replace atomically, so an interrupted run never leaves a half-written file.
-    tmp = out_dir / f".{SUMS_NAME}.tmp"
+    tmp = out_dir / _SUMS_TMP_NAME
     tmp.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
     os.replace(tmp, out_dir / SUMS_NAME)
 
@@ -404,10 +411,10 @@ def _readme_generator(readme: Path) -> Optional[str]:
         lines = readme.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0].rstrip() != "---":
         return None
     try:
-        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+        end = next(i for i in range(1, len(lines)) if lines[i].rstrip() == "---")
     except StopIteration:
         return None
     try:
@@ -420,28 +427,80 @@ def _readme_generator(readme: Path) -> Optional[str]:
     return str(generator) if generator is not None else None
 
 
-def _safe_listed_file(out_dir: Path, root: Path, name: str) -> Optional[Path]:
-    """The path of a listed file that is safe to delete, else None.
+def _listed_relpath(name: str) -> Optional[PurePosixPath]:
+    """A listed name as a relative path, or None if it is not a plain relative path.
 
-    The listing is data from disk and may be damaged or hostile: only relative
-    paths with no ``..`` that resolve (through any symlinks) to an existing
-    regular file inside *out_dir* qualify.
+    The listing is data from disk and may be damaged or hostile: absolute
+    paths, ``..`` parts, NUL bytes and empty names are never acted on.
     """
     if not name or "\0" in name:
         return None
     rel = PurePosixPath(name)
-    if rel.is_absolute() or ".." in rel.parts:
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
         return None
-    candidate = out_dir / rel
+    return rel
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY
+
+
+def _open_chain(root_fd: int, parts: Tuple[str, ...]) -> int:
+    """Open the directory at *parts* below *root_fd*, one component at a time.
+
+    Each component is opened relative to the previous handle with
+    ``O_NOFOLLOW``, so a symlinked component (even one swapped in after any
+    earlier check) fails with OSError instead of leading out of the tree.
+    The caller closes the returned descriptor.
+    """
+    fd = os.dup(root_fd)
     try:
-        resolved = candidate.resolve()
-    except (OSError, RuntimeError):
-        return None
-    if resolved == root or not resolved.is_relative_to(root):
-        return None
-    if resolved.is_dir() or not resolved.is_file():
-        return None
-    return candidate
+        for part in parts:
+            nxt = os.open(part, _DIR_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _delete_regular_file(root_fd: int, rel: PurePosixPath) -> bool:
+    """Delete the regular file *rel* below *root_fd*; True if it was deleted.
+
+    Works through directory handles, never through a path string, so nothing
+    outside the tree can be reached. A final name that is itself a symlink is
+    skipped (an export never writes one), as is anything that is not a regular
+    file.
+    """
+    try:
+        parent_fd = _open_chain(root_fd, rel.parts[:-1])
+    except OSError:
+        return False
+    try:
+        name = rel.parts[-1]
+        try:
+            if not stat.S_ISREG(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+                return False
+            os.unlink(name, dir_fd=parent_fd)
+        except OSError:
+            return False
+        return True
+    finally:
+        os.close(parent_fd)
+
+
+def _remove_empty_directory(root_fd: int, rel: PurePosixPath) -> None:
+    """rmdir *rel* below *root_fd* if it is an empty real directory."""
+    try:
+        parent_fd = _open_chain(root_fd, rel.parts[:-1])
+    except OSError:
+        return
+    try:
+        os.rmdir(rel.parts[-1], dir_fd=parent_fd)
+    except OSError:
+        pass  # not empty (a person's file lives there), or a symlink
+    finally:
+        os.close(parent_fd)
 
 
 def prepare_destination(out_dir: Path) -> None:
@@ -482,29 +541,23 @@ def prepare_destination(out_dir: Path) -> None:
             "unknown. Remove the folder and export again."
         )
 
-    root = out_dir.resolve()
     listed = _parse_sums(sums.read_bytes().decode("utf-8", "surrogateescape"))
-    deleted_parents = set()
-    readme_listed = False
-    for name in listed:
-        path = _safe_listed_file(out_dir, root, name)
-        if path is None:
-            continue
-        if PurePosixPath(name) == PurePosixPath(README_NAME):
-            readme_listed = True  # deleted last, below
-            continue
-        path.unlink()
-        deleted_parents.update(PurePosixPath(name).parents)
+    root_fd = os.open(out_dir, _DIR_FLAGS)
+    try:
+        deleted_parents = set()
+        for name in listed:
+            rel = _listed_relpath(name)
+            if rel is None or rel in (PurePosixPath(SUMS_NAME), PurePosixPath(README_NAME)):
+                continue  # SHA256SUMS and README.md are removed last, below
+            if _delete_regular_file(root_fd, rel):
+                deleted_parents.update(p for p in rel.parents if p.parts)
 
-    # Directories the deleted files leave empty, deepest first; never out_dir.
-    for rel in sorted(deleted_parents, key=lambda p: len(p.parts), reverse=True):
-        if not rel.parts:
-            continue
-        try:
-            (out_dir / rel).rmdir()
-        except OSError:
-            pass  # not empty (a person's file lives there), or a symlink
+        # Directories the deleted files leave empty, deepest first; never out_dir.
+        for rel in sorted(deleted_parents, key=lambda p: len(p.parts), reverse=True):
+            _remove_empty_directory(root_fd, rel)
 
-    sums.unlink()
-    if readme_listed:
-        (out_dir / README_NAME).unlink()
+        _delete_regular_file(root_fd, PurePosixPath(SUMS_NAME))
+        if PurePosixPath(README_NAME) in map(_listed_relpath, listed):
+            _delete_regular_file(root_fd, PurePosixPath(README_NAME))
+    finally:
+        os.close(root_fd)

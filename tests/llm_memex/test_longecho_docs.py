@@ -404,3 +404,116 @@ def test_escaped_names_round_trip_through_prepare(tmp_path):
     write_sha256sums(out)
     prepare_destination(out)
     assert not (out / "data").exists()
+
+
+# ------------------------------------------------------------- fix round 1
+
+def test_prepare_symlinked_parent_inside_tree_deletes_nothing_outside(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "secret.txt").write_text("precious")
+    out = tmp_path / "out"
+    _stamped_export(out, {"data/x.txt": "x"})
+    (out / "data" / "link").symlink_to(outside, target_is_directory=True)
+    with open(out / "SHA256SUMS", "a") as fh:
+        fh.write(f"{'0' * 64}  data/link/sub/secret.txt\n")
+    prepare_destination(out)
+    assert (outside / "sub" / "secret.txt").read_text() == "precious"
+    assert (out / "data" / "link").is_symlink()  # kept: its directory is not emptied
+
+
+def test_prepare_final_name_symlink_to_outside_file_is_left_alone(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("precious")
+    out = tmp_path / "out"
+    _stamped_export(out, {"data/x.txt": "x"})
+    (out / "data" / "link.txt").symlink_to(outside)
+    with open(out / "SHA256SUMS", "a") as fh:
+        fh.write(f"{'0' * 64}  data/link.txt\n")
+    prepare_destination(out)
+    assert outside.read_text() == "precious"
+    assert (out / "data" / "link.txt").is_symlink()  # skipped, not even unlinked
+    assert not (out / "data" / "x.txt").exists()
+
+
+def test_directory_chain_refuses_symlinked_component(tmp_path):
+    import os
+    from llm_memex.exporters import _longecho_docs as docs
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("precious")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "d").symlink_to(outside, target_is_directory=True)
+    root_fd = os.open(out, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError):
+            docs._open_chain(root_fd, ("d",))
+        from pathlib import PurePosixPath
+        assert docs._delete_regular_file(root_fd, PurePosixPath("d/secret.txt")) is False
+        # a component swapped for a symlink after any path check: the handle walk
+        # never resolves it, so the same call stays harmless
+        assert docs._delete_regular_file(root_fd, PurePosixPath("secret.txt")) is False
+    finally:
+        os.close(root_fd)
+    assert (outside / "secret.txt").read_text() == "precious"
+
+
+def test_prepare_leaks_no_file_descriptors(tmp_path):
+    import os
+    before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+    out = tmp_path / "out"
+    _stamped_export(out, {"a/b/c.txt": "c", "a/d.txt": "d"})
+    with open(out / "SHA256SUMS", "a") as fh:
+        fh.write(f"{'0' * 64}  ../x\n{'0' * 64}  a/nope/z.txt\n")
+    prepare_destination(out)
+    if before is not None:
+        assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_prepare_sums_listing_itself_is_fine(tmp_path):
+    out = tmp_path / "out"
+    _stamped_export(out, {"data/x.txt": "x"})
+    with open(out / "SHA256SUMS", "a") as fh:
+        fh.write(f"{'0' * 64}  SHA256SUMS\n")
+    prepare_destination(out)
+    assert not (out / "SHA256SUMS").exists()
+    assert not (out / "data").exists()
+
+
+def test_own_readme_with_triple_dash_owner_is_accepted_back(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "README.md").write_text(render_root_readme(_summary(owner="Ada\n---\nLovelace")))
+    (out / "data").mkdir()
+    (out / "data" / "x.txt").write_text("x")
+    write_sha256sums(out)
+    prepare_destination(out)
+    assert not (out / "data").exists()
+
+
+def test_sha256sums_ignores_stale_temp_file(tmp_path):
+    out = tmp_path / "out"
+    _stamped_export(out, {"data/x.txt": "x"}, sums=False)
+    (out / ".SHA256SUMS.tmp").write_text("left by an interrupted run")
+    write_sha256sums(out)
+    paths = [line[66:] for line in (out / "SHA256SUMS").read_text().splitlines()]
+    assert paths == ["README.md", "data/x.txt"]
+    assert not (out / ".SHA256SUMS.tmp").exists()  # replaced, not left behind
+
+
+def test_readme_opening_wording_and_notes_location():
+    text = render_root_readme(_summary())
+    assert "each one needs less than the next" not in text
+    assert "Each later option needs more tools" in text
+    body = text.split("## What was left out")[1].split("## How to verify")[0]
+    assert "quoted notes in the `text/` files" in body and "`notes` table" in body
+    gone = render_root_readme(_summary(include_notes=False))
+    assert "quoted notes" not in gone
+
+
+def test_readme_single_date():
+    body = render_root_readme(_summary(first="2025-06-03", last="2025-06-03"))
+    assert "All of it is from 2025-06-03" in body
+    assert "oldest conversation" not in body
