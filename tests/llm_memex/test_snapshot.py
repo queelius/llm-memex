@@ -76,3 +76,13 @@ def test_gzip_file_deletes_source_by_default(tmp_path):
     src.write_bytes(b"payload")
     gzip_file(src, tmp_path / "data.bin.gz")
     assert not src.exists()
+
+
+def test_check_destination_resolves_symlinked_source_assets(tmp_path):
+    """A source assets/ that leads into the destination is judged by its target."""
+    db_path = _seed(tmp_path)
+    out = tmp_path / "out"
+    (out / "data" / "assets").mkdir(parents=True)
+    (db_path.parent / "assets").symlink_to(out / "data" / "assets")
+    with pytest.raises(ValueError, match="must not overwrite the source"):
+        check_destination(db_path, out)

@@ -139,11 +139,13 @@ def check_destination(db_path: Path, out_dir: Path) -> None:
 
     Raises ``ValueError`` when ``out_dir`` is the source database's directory,
     an ancestor of it, a path inside its ``assets/``, or when its own
-    ``assets/`` (e.g. a symlink) resolves into the source ``assets/``. Called
-    before any file is touched.
+    ``assets/`` (e.g. a symlink) resolves into the source ``assets/``, or when
+    the source ``assets/`` (e.g. a symlink) resolves to somewhere inside
+    ``out_dir``. Called before any file is touched.
     """
     source_dir = Path(db_path).resolve().parent
-    source_assets = source_dir / "assets"
+    # Resolved, so a symlinked source assets/ is judged by where it leads.
+    source_assets = (source_dir / "assets").resolve()
     out = Path(out_dir).resolve()
     out_assets = (out / "assets").resolve()
     if (
@@ -151,6 +153,7 @@ def check_destination(db_path: Path, out_dir: Path) -> None:
         or out.is_relative_to(source_assets)
         or out_assets.is_relative_to(source_assets)
         or source_assets.is_relative_to(out_assets)
+        or source_assets.is_relative_to(out)
     ):
         raise ValueError(
             "Export destination must not overwrite the source database or assets"
