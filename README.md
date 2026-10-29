@@ -45,6 +45,7 @@ llm-memex export output.md --format markdown
 llm-memex export output.json --format json
 llm-memex export ./archive --format arkiv    # universal archive format
 llm-memex export ./site --format html        # self-contained HTML SPA
+llm-memex export ./archive --format longecho --owner "Your Name"   # resilient archive folder
 ```
 
 **MCP server** (for Claude Desktop, agent SDKs, etc.):
@@ -76,6 +77,7 @@ llm-memex run enrich_trivial --apply
 | JSON                  | -      | Yes    | |
 | HTML (SPA)            | -      | Yes    | Self-contained, light/dark, librarian chat |
 | Arkiv                 | -      | Yes    | Universal record format (JSONL + schema.yaml) |
+| longecho              | -      | Yes    | Self-explaining folder: README, data, Markdown text, offline viewer |
 
 ## HTML Export
 
@@ -86,6 +88,28 @@ The HTML exporter builds a self-contained single-page app that loads the SQLite 
 - **Librarian chat**: ask questions about your archive. An LLM queries the database via Anthropic tool use, using the `metafunctor-edge` proxy by default (no API key required). You can also configure a direct Anthropic endpoint.
 - **Per-conversation resume chat**: continue an existing conversation
 - **Marginalia**: annotate messages and conversations with free-form notes, inline in the browser
+
+## longecho archive
+
+`--format longecho` writes a folder meant to outlast the tools that made it. It is one database exported as a [longecho](https://github.com/queelius/longecho) archive:
+
+```bash
+llm-memex export ./archive --format longecho --owner "Your Name"
+```
+
+The folder holds:
+
+- `README.md`: explains the archive to a reader with no context, including how to open each part with the plainest tool. `--owner` sets the name shown there.
+- `SHA256SUMS`: checksums of everything the export wrote (`sha256sum -c SHA256SUMS`).
+- `data/`: the SQLite database (`conversations.db`), the arkiv JSONL records (`arkiv/`), and the media (`assets/`).
+- `text/`: every conversation as a Markdown file, plus an `index.md`.
+- `site/`: the viewer. Double-click `site/index.html` to open it; it needs no server and no network. Media that lives on the web is shown as a link, not loaded.
+
+The viewer loads the whole database into the browser, so it is limited to archives whose database is at most 1 GiB. A larger archive still gets `data/` and `text/`, just no viewer database.
+
+Archived conversations (unless `--include-archived`) and notes (under `--no-notes`) are left out of every part.
+
+Exporting again into the same folder is safe. Only the files the previous export listed in `SHA256SUMS` are replaced or removed; files you added by hand are kept. A folder that this command did not write (no `generator: llm-memex longecho` stamp in its `README.md`) is refused and left untouched.
 
 ## Notes (Marginalia)
 

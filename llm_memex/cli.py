@@ -96,6 +96,9 @@ def main():
     exp.add_argument("--include-archived", action="store_true",
                      help="Include soft-deleted (archived) conversations in the "
                           "export (HTML export excludes them by default)")
+    exp.add_argument("--owner", default=None, metavar="NAME",
+                     help="Name shown in a longecho archive's README "
+                          "(other formats ignore it)")
     exp.add_argument(
         "--db",
         help="Database directory",
@@ -144,9 +147,11 @@ def main():
 
 
 def _get_version():
-    from llm_memex import __version__
+    # Installed metadata, not ``llm_memex.__version__``: robust when a test
+    # package directory shadows the real package (workspace convention C10).
+    from importlib.metadata import version
 
-    return __version__
+    return version("llm-memex")
 
 
 def _list_formats(formats, label):
@@ -612,7 +617,27 @@ def _cmd_export(args):
     include_notes = not getattr(args, "no_notes", False)
     include_archived = getattr(args, "include_archived", False)
 
+    owner = getattr(args, "owner", None)
+
     with _open_db(args) as db:
+        if getattr(exporter_mod, "READS_DATABASE", False):
+            # The exporter reads the database itself (a consistent snapshot),
+            # so loading every conversation here would be wasted work.
+            try:
+                count = exporter_mod.export(
+                    [], args.output,
+                    db_path=db.db_path,
+                    db=db,
+                    include_notes=include_notes,
+                    include_archived=include_archived,
+                    owner=owner,
+                )
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Exported {count} conversation(s) to {args.output}")
+            return
+
         # Load conversations in chunks to avoid memory exhaustion.
         # Privacy contract: soft-deleted (archived) conversations must not
         # travel in a published bundle by default. Filtering at this shared
@@ -634,13 +659,18 @@ def _cmd_export(args):
             if not result["has_more"]:
                 break
             cursor = result["next_cursor"]
-        exporter_mod.export(
-            convs, args.output,
-            db_path=db.db_path,
-            db=db,
-            include_notes=include_notes,
-            include_archived=include_archived,
-        )
+        try:
+            exporter_mod.export(
+                convs, args.output,
+                db_path=db.db_path,
+                db=db,
+                include_notes=include_notes,
+                include_archived=include_archived,
+                owner=owner,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"Exported {len(convs)} conversation(s) to {args.output}")
 
 

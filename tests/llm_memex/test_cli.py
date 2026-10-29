@@ -1085,6 +1085,68 @@ class TestCLIExportArchivedExclusion:
         assert "SECRET_DELETED_TEXT" not in content
 
 
+class TestCLIExportLongecho:
+    """``export --format longecho``: the exporter reads the database itself."""
+
+    def _make_db(self, tmp_path):
+        from datetime import datetime
+        from llm_memex.db import Database
+        from llm_memex.models import Conversation, Message, text_block
+        db_dir = tmp_path / "db"
+        when = datetime(2025, 6, 3, 8, 0)
+        conv = Conversation("c1", when, when, title="Hello there", source="openai")
+        conv.add_message(Message(id="m1", role="user", parent_id=None,
+                                 content=[text_block("hi")]))
+        with Database(str(db_dir)) as db:
+            db.save_conversation(conv)
+        return db_dir
+
+    def test_export_longecho_end_to_end(self, tmp_path):
+        db_dir = self._make_db(tmp_path)
+        out = tmp_path / "out"
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out),
+             "--format", "longecho", "--db", str(db_dir), "--owner", "Ada"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Exported 1 conversation(s)" in result.stdout
+        assert "Ada" in (out / "README.md").read_text()
+
+    def test_export_longecho_does_not_load_conversations(self, tmp_path, monkeypatch):
+        import llm_memex.cli
+        import llm_memex.db
+
+        db_dir = self._make_db(tmp_path)
+        out = tmp_path / "out"
+
+        def boom(*args, **kwargs):
+            raise AssertionError("the CLI must not load conversations for longecho")
+
+        monkeypatch.setattr(llm_memex.db.Database, "query_conversations", boom)
+        monkeypatch.setattr(sys, "argv", [
+            "llm-memex", "export", str(out), "--format", "longecho",
+            "--db", str(db_dir)])
+        llm_memex.cli.main()
+        assert (out / "SHA256SUMS").is_file()
+
+    def test_export_longecho_refuses_foreign_dir(self, tmp_path):
+        db_dir = self._make_db(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "README.md").write_text("# my own notes\n")
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_memex", "export", str(out),
+             "--format", "longecho", "--db", str(db_dir)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1
+        assert result.stderr.startswith("Error: ")
+        assert "generator" in result.stderr
+        assert sorted(p.name for p in out.iterdir()) == ["README.md"]
+        assert (out / "README.md").read_text() == "# my own notes\n"
+
+
 class TestCLIShow:
     def _import_one(self, tmp_path):
         """Helper: import one conversation, return db_dir."""

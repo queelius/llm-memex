@@ -33,6 +33,7 @@ llm-memex show <id>                                   # view conversation
 llm-memex show --search "topic"                       # FTS search
 llm-memex export output.md --format markdown
 llm-memex export ./site --format html                 # self-contained SPA directory
+llm-memex export ./archive --format longecho --owner "Name"   # longecho archive folder (README, data/, text/, site/)
 llm-memex export ./archive --format arkiv             # JSONL + schema.yaml
 llm-memex import --list-formats                       # discover importers
 llm-memex export --list-formats                       # discover exporters
@@ -82,6 +83,11 @@ llm_memex/
     markdown.py, json_export.py, arkiv_export.py
     html.py              # HTML SPA exporter (directory: index.html + DB + assets)
     html_template.py     # Self-contained HTML5 SPA template (composable functions)
+    _snapshot.py         # Shared publication helpers: take_snapshot, check_destination, copy_retained_assets, gzip_file
+    longecho.py          # longecho archive exporter (README, SHA256SUMS, data/, text/, site/); READS_DATABASE
+    _longecho_text.py    # Per-conversation Markdown (text/) and index.md
+    _longecho_site.py    # file://-safe viewer: sql.js and DB chunks as script files
+    _longecho_docs.py    # README rendering, SHA256SUMS, safe re-export (ownership stamp)
 ```
 
 **Key design decisions:**
@@ -152,8 +158,9 @@ WHERE notes_fts MATCH 'query'
 
 The HTML exporter outputs a self-contained directory (`index.html` + `conversations.db[.gz]` + `assets/`):
 
-- **Publication pipeline** (`exporters/html.py`): SQLite backup API snapshot over a `mode=ro` connection (a file copy would miss committed WAL frames and must not close the user's live writer) → `_strip_fts5_and_vacuum` (drops FTS5 tables, archived conversations unless `include_archived`, notes under `--no-notes`; sets `journal_mode=DELETE`) → `_copy_retained_assets` copies only the media referenced by the retained messages (walking nested content blocks, confined to `assets/`), never the whole sibling directory → optional gzip. Export refuses a destination that aliases the source DB or overlaps its `assets/`
+- **Publication pipeline** (helpers in `exporters/_snapshot.py`, used by `html.py` and `longecho.py`): SQLite backup API snapshot over a `mode=ro` connection (a file copy would miss committed WAL frames and must not close the user's live writer) → `_strip_fts5_and_vacuum` (drops FTS5 tables, archived conversations unless `include_archived`, notes under `--no-notes`; sets `journal_mode=DELETE`) → `_copy_retained_assets` copies only the media referenced by the retained messages (walking nested content blocks, confined to `assets/`), never the whole sibling directory → optional gzip. Export refuses a destination that aliases the source DB or overlaps its `assets/`
 
+- **longecho export** (`--format longecho`, `exporters/longecho.py`): a longecho-compliant folder from one database (`README.md`, `SHA256SUMS`, `data/{conversations.db,arkiv/,assets/}`, `text/` Markdown per conversation plus `index.md`, `site/` viewer). Every part is built from the same projected snapshot as the HTML export, one conversation at a time, so privacy filters (archived, `--no-notes`) hold everywhere and memory stays bounded. The viewer opens from `file://`: sql.js and the DB (gzipped, split into 16 MiB chunks) are loaded as script files rather than `fetch`ed, under a stricter CSP (`file:` allowed in `img-src`/`media-src` for local media; remote media becomes links, no network). An archive whose projected DB exceeds 1 GiB gets `data/` and `text/` but no DB chunks. Re-export safety: both READMEs carry `generator: llm-memex longecho <version>`; a folder without the stamp is refused, and only files the previous export listed in `SHA256SUMS` are replaced or removed (hand-added files survive; a stamped README with no `SHA256SUMS` means an interrupted run and is refused). The README is written first as a placeholder and last in final form so any interruption is detectable
 - **Template architecture**: `get_template(schema_ddl)` assembles from composable functions: `_css_variables()`, `_css_layout()`, `_css_components()`, `_html_structure()`, `_js_core()`, `_js_ui()`, `_js_notes()`, `_js_chat(schema_ddl)`, `_js_settings()`
 - **Light/dark mode**: `data-theme` attribute on `<html>`, defaults to OS preference, manual toggle saved to localStorage
 - **Librarian chat**: agentic tool-use loop (streaming first round, non-streaming for tool rounds, max 5 rounds). SQL guard rejects non-SELECT/EXPLAIN + `getRowsModified` runtime check
@@ -164,6 +171,7 @@ The HTML exporter outputs a self-contained directory (`index.html` + `conversati
 ## Gotchas
 
 - `Database(path)` takes a **directory** path (creates `conversations.db` inside it), except for `:memory:`
+- `READS_DATABASE`: an exporter module may set `READS_DATABASE = True` (longecho does). `_cmd_export` then skips loading conversations and calls `export([], path, db_path=..., db=..., include_notes=..., include_archived=..., owner=...)`, printing the returned count. A `ValueError` from any exporter is shown as `Error: <message>` with exit 1. `--owner` is only used by longecho
 - `Database(path, readonly=True)` installs a sqlite3 **authorizer** (`_authorize`, gated by `_WRITE_ACTIONS`) in addition to `PRAGMA query_only`. The authorizer denies all write actions, `ATTACH`/`DETACH` (so agent SQL cannot reach sibling DB files), and any attempt to flip `query_only` back off. This is strictly stronger than `query_only` alone, which agent-supplied SQL can otherwise turn off to regain write access. Writes on a readonly connection raise `sqlite3.DatabaseError: not authorized`
 - MCP `execute_sql` goes through `Database.execute_agent_sql`, which (unless `sql_write`) runs on a **separate** `mode=ro` connection with the same write-denying authorizer, never on `self.conn`. Keeping agent SQL off the main connection also stops it changing connection state the structured writes rely on (`PRAGMA foreign_keys=OFF`). An in-memory `Database` cannot be reopened read-only, so agent SQL on a writable `:memory:` DB raises `ValueError`
 - `_auto_import` prefers `claude_code_full` over `claude_code` when both detect the same file
