@@ -1265,7 +1265,9 @@ class TestHtmlExporter:
         db_dir = tmp_path / "db"
         db_dir.mkdir()
         with Database(str(db_dir)) as db:
-            db.save_conversation(_make_conv())
+            conv = _make_conv()
+            conv.messages["m1"].content.append({"type": "media", "url": "assets/test_image.png"})
+            db.save_conversation(conv)
 
         # Create an assets directory with a test file
         assets_dir = db_dir / "assets"
@@ -1315,7 +1317,9 @@ class TestHtmlExporter:
         db_dir = tmp_path / "db"
         db_dir.mkdir()
         with Database(str(db_dir)) as db:
-            db.save_conversation(_make_conv())
+            conv = _make_conv()
+            conv.messages["m1"].content.append({"type": "media", "url": "assets/new.png"})
+            db.save_conversation(conv)
 
         # Source assets
         assets_dir = db_dir / "assets"

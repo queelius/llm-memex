@@ -141,7 +141,7 @@ WHERE notes_fts MATCH 'query'
 
 ## Testing
 
-- Tests in `tests/llm_memex/`, one `test_<module>.py` per module, plus `test_integration.py` and `test_arkiv_roundtrip.py` (export → SPA-shaped arkiv → `--merge`)
+- Tests in `tests/llm_memex/`, one `test_<module>.py` per module, plus `test_integration.py`, `test_arkiv_roundtrip.py` (export → SPA-shaped arkiv → `--merge`), and `test_html_snapshot.py` (published-snapshot privacy)
 - `pytest.ini` takes precedence over `[tool.pytest.ini_options]` in `pyproject.toml`, so pytest ignores the pyproject section (including its `asyncio_mode`). Change test config in `pytest.ini`
 - `conftest.py` provides `tmp_db_path` fixture
 - Server tests exercise DB methods directly; `create_server(db=db, sql_write=...)` controls only raw `execute_sql` writes. Structured write tools work on any writable `Database`; test their refusal path with `Database(path, readonly=True)`
@@ -150,7 +150,9 @@ WHERE notes_fts MATCH 'query'
 
 ## HTML SPA Export
 
-The HTML exporter outputs a self-contained directory (`index.html` + `conversations.db` + `assets/`):
+The HTML exporter outputs a self-contained directory (`index.html` + `conversations.db[.gz]` + `assets/`):
+
+- **Publication pipeline** (`exporters/html.py`): SQLite backup API snapshot over a `mode=ro` connection (a file copy would miss committed WAL frames and must not close the user's live writer) → `_strip_fts5_and_vacuum` (drops FTS5 tables, archived conversations unless `include_archived`, notes under `--no-notes`; sets `journal_mode=DELETE`) → `_copy_retained_assets` copies only the media referenced by the retained messages (walking nested content blocks, confined to `assets/`), never the whole sibling directory → optional gzip. Export refuses a destination that aliases the source DB or overlaps its `assets/`
 
 - **Template architecture**: `get_template(schema_ddl)` assembles from composable functions: `_css_variables()`, `_css_layout()`, `_css_components()`, `_html_structure()`, `_js_core()`, `_js_ui()`, `_js_notes()`, `_js_chat(schema_ddl)`, `_js_settings()`
 - **Light/dark mode**: `data-theme` attribute on `<html>`, defaults to OS preference, manual toggle saved to localStorage

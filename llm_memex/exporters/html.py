@@ -1,11 +1,13 @@
 """Export conversations as a self-contained HTML SPA directory."""
 import contextlib
 import gzip
+import json
 import os
 import shutil
 import sqlite3
 from pathlib import Path
 from typing import List
+from urllib.parse import unquote, urlsplit
 
 from llm_memex.db import Database
 from llm_memex.exporters.html_template import get_template
@@ -95,6 +97,41 @@ def _gzip_file(src: Path, dst: Path, level: int = _DB_GZIP_LEVEL) -> None:
     src.unlink()
 
 
+def _media_urls(value):
+    """Walk structured content, including media nested in tool results."""
+    if isinstance(value, dict):
+        if value.get("type") == "media" and isinstance(value.get("url"), str):
+            yield value["url"]
+        for child in value.values():
+            yield from _media_urls(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _media_urls(child)
+
+
+def _copy_retained_assets(db_path: Path, source: Path, destination: Path) -> None:
+    """Copy only media referenced by the sanitized snapshot, within assets/."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    root = source.resolve()
+    with sqlite3.connect(db_path) as conn:
+        for (content,) in conn.execute("SELECT content FROM messages"):
+            for url in _media_urls(json.loads(content)):
+                parsed = urlsplit(url)
+                relative = Path(unquote(parsed.path))
+                if parsed.scheme or parsed.netloc or relative.is_absolute():
+                    continue
+                if not relative.parts or relative.parts[0] != "assets" or ".." in relative.parts:
+                    continue
+                relative = Path(*relative.parts[1:])
+                src = (root / relative).resolve()
+                if not src.is_relative_to(root) or not src.is_file():
+                    continue
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+
+
 def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     """Export as HTML SPA directory.
 
@@ -105,7 +142,7 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
       with FTS5 stripped (if ``db_path`` provided). The SPA fetches this
       transparently and decompresses via ``DecompressionStream('gzip')``
       — no library dependency on the reader side.
-    - ``assets/``                        copy of media assets directory
+    - ``assets/``                        media referenced by retained messages
 
     Parameters
     ----------
@@ -117,17 +154,27 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     **kwargs :
         db_path : str, optional
             Path to the source conversations.db file.  When provided (and not
-            ``":memory:"``), the DB and its sibling ``assets/`` directory are
-            copied into the output.
+            ``":memory:"``), take a consistent SQLite snapshot and copy only
+            referenced assets from its sibling ``assets/`` directory.
         compress_db : bool, optional
             Whether to gzip the exported DB (default True). Set False for
             tooling that needs the raw .db file inline.
     """
     out_dir = Path(path)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     db_path = kwargs.get("db_path")
     has_db = db_path and db_path != ":memory:" and os.path.exists(db_path)
+    if has_db:
+        source_db = Path(db_path).resolve()
+        target_db = out_dir / "conversations.db"
+        source_assets = (Path(db_path).parent / "assets").resolve()
+        target_assets = (out_dir / "assets").resolve()
+        aliases_db = target_db.resolve() == source_db or (
+            target_db.exists() and target_db.samefile(source_db)
+        )
+        overlaps_assets = source_assets.is_relative_to(target_assets) or target_assets.is_relative_to(source_assets)
+        if aliases_db or overlaps_assets:
+            raise ValueError("Export destination must not overwrite the source database or assets")
+    out_dir.mkdir(parents=True, exist_ok=True)
     compress_db = kwargs.get("compress_db", True)
     # The CLI passes include_notes=False for `--no-notes`. The DB copy is
     # what carries all SPA data, so honoring the flag means dropping the
@@ -162,15 +209,19 @@ def export(conversations: List[Conversation], path: str, **kwargs) -> None:
     # Copy DB (stripping FTS5 shadow tables), optionally gzip, and copy assets
     if has_db:
         dest_db = out_dir / "conversations.db"
-        shutil.copy2(db_path, dest_db)
+        # A filesystem copy omits committed WAL frames, including an entire
+        # newly-created schema. SQLite's backup API includes committed changes
+        # without checkpointing or closing the user's live connection.
+        with contextlib.closing(sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)) as source:
+            with contextlib.closing(sqlite3.connect(dest_db)) as destination:
+                source.backup(destination)
         _strip_fts5_and_vacuum(
             dest_db, drop_notes=not include_notes, include_archived=include_archived
         )
+        _copy_retained_assets(dest_db, Path(db_path).parent / "assets", out_dir / "assets")
         if compress_db:
             _gzip_file(dest_db, out_dir / "conversations.db.gz")
-        assets_dir = Path(db_path).parent / "assets"
-        if assets_dir.is_dir():
-            dest_assets = out_dir / "assets"
-            if dest_assets.exists():
-                shutil.rmtree(dest_assets)
-            shutil.copytree(assets_dir, dest_assets)
+        else:
+            # The browser tries gzip first; an older bundle must not mask the
+            # new snapshot or keep excluded data available beside it.
+            (out_dir / "conversations.db.gz").unlink(missing_ok=True)
