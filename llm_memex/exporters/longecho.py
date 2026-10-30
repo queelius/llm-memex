@@ -26,6 +26,7 @@ from llm_memex.exporters._longecho_docs import (
     ArchiveSummary,
     clear_destination,
     inspect_destination,
+    remove_empty_directories,
     render_placeholder_readme,
     render_root_readme,
     render_site_readme,
@@ -231,10 +232,27 @@ class _Run:
         """
         if not self.cleared:
             return
+        if self.blind_dirs_ours:
+            # Empty directories this run made there would be refused as foreign.
+            dirs = [PurePosixPath(name) for name in _WRITTEN_BLINDLY]
+            for name in _WRITTEN_BLINDLY:
+                dirs += _dirs_under(self.out, name)
+            with contextlib.suppress(OSError):
+                remove_empty_directories(self.out, dirs)
         try:
             write_sha256sums(self.out, self.finished_files())
         except Exception:
             pass
+
+
+def _dirs_under(out: Path, rel: str) -> List[PurePosixPath]:
+    """Every directory below ``out/rel``, as paths relative to ``out``."""
+    found = []
+    for dirpath, dirnames, _filenames in os.walk(out / rel, followlinks=False):
+        for name in dirnames:
+            full = Path(dirpath) / name
+            found.append(PurePosixPath(full.relative_to(out).as_posix()))
+    return found
 
 
 def _files_under(out: Path, rel: str) -> List[PurePosixPath]:
@@ -269,6 +287,10 @@ def _refuse_foreign_content(out: Path, listed: Set[PurePosixPath]) -> None:
         top = out / name
         if top.is_symlink():
             raise ValueError(f"{top} is a symbolic link; refusing to write through it")
+        # The tree itself too: one holding no listed file (or not a directory)
+        # would survive the clearing.
+        if top.exists() and (not top.is_dir() or PurePosixPath(name) not in listed_dirs):
+            raise ValueError(_leftover_message(top))
         for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
             for entry in sorted(dirnames + filenames):
                 full = Path(dirpath) / entry

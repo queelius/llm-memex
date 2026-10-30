@@ -537,6 +537,21 @@ def _remove_empty_directory(root_fd: int, rel: PurePosixPath) -> None:
         os.close(parent_fd)
 
 
+def remove_empty_directories(out_dir: Path, dirs: Iterable[PurePosixPath]) -> None:
+    """rmdir each of *dirs* below *out_dir* that is empty, deepest first.
+
+    Through directory handles like every other deletion here; a directory
+    that holds anything, or is a symlink, is left alone.
+    """
+    root_fd = os.open(out_dir, _DIR_FLAGS)
+    try:
+        for rel in sorted(set(dirs), key=lambda p: len(p.parts), reverse=True):
+            if rel.parts:
+                _remove_empty_directory(root_fd, rel)
+    finally:
+        os.close(root_fd)
+
+
 def inspect_destination(out_dir: Path) -> Set[PurePosixPath]:
     """Decide whether *out_dir* may receive a fresh export; touch nothing.
 
@@ -576,8 +591,8 @@ def clear_destination(out_dir: Path, listed: Iterable[PurePosixPath]) -> None:
     """Delete the files *listed* (from :func:`inspect_destination`) below *out_dir*.
 
     Creates *out_dir* if it is missing. Deletes exactly the listed regular
-    files, then the directories that leaves empty; anything a person added
-    stays. Every deletion goes through directory handles (see
+    files, then the directories of listed files left empty; anything a
+    person added stays. Every deletion goes through directory handles (see
     ``_delete_regular_file``), so a symlink cannot lead it out of the tree.
 
     Order matters for recovery: the root README, which holds the ownership
@@ -593,13 +608,15 @@ def clear_destination(out_dir: Path, listed: Iterable[PurePosixPath]) -> None:
     last = (PurePosixPath(SUMS_NAME), PurePosixPath(README_NAME))
     root_fd = os.open(out_dir, _DIR_FLAGS)
     try:
-        deleted_parents = set()
+        parents = set()
         for rel in sorted(plain - set(last)):
-            if _delete_regular_file(root_fd, rel):
-                deleted_parents.update(p for p in rel.parents if p.parts)
+            _delete_regular_file(root_fd, rel)
+            parents.update(p for p in rel.parents if p.parts)
 
-        # Directories the deleted files leave empty, deepest first; never out_dir.
-        for rel in sorted(deleted_parents, key=lambda p: len(p.parts), reverse=True):
+        # Directories of listed files left empty, deepest first; never out_dir.
+        # Those of files already gone count too: an emptied data/arkiv must not
+        # outlive the export that listed it.
+        for rel in sorted(parents, key=lambda p: len(p.parts), reverse=True):
             _remove_empty_directory(root_fd, rel)
 
         # SHA256SUMS always goes (it described the files just deleted).

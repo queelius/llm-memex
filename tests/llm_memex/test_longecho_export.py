@@ -382,6 +382,48 @@ def test_refuses_foreign_empty_directory_where_it_would_write(source, tmp_path):
     assert (out / "data" / "conversations.db").is_file()
 
 
+def test_file_where_a_blind_directory_goes_is_refused_before_deleting(source, tmp_path):
+    """Re-review probe: a file at data/arkiv passed the up-front checks, so the
+    previous export was cleared before the leftover backstop refused."""
+    out = tmp_path / "out"
+    _export(source, out)
+    shutil.rmtree(out / "data" / "arkiv")
+    (out / "data" / "arkiv").write_text("hand")
+    before = _tree(out)
+    with pytest.raises(ValueError, match="was not written"):
+        _export(source, out)
+    assert _tree(out) == before
+
+
+@pytest.mark.parametrize("name", ["data/arkiv", "data/assets"])
+def test_emptied_blind_directory_is_replaced(source, tmp_path, name):
+    """Re-review probe: its listed files gone, the empty directory used to
+    survive the clearing, so the backstop refused after the export was deleted."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+    shutil.rmtree(out / name)
+    (out / name).mkdir()
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
+
+
+def test_unlisted_empty_blind_directory_is_refused_before_deleting(source, tmp_path):
+    """data/assets that the previous export never wrote is not ours to remove."""
+    out = tmp_path / "out"
+    _export(source, out)
+    shutil.rmtree(out / "data" / "assets")
+    write = (out / "SHA256SUMS").read_text().splitlines()
+    (out / "SHA256SUMS").write_text(
+        "".join(l + "\n" for l in write if "data/assets/" not in l))
+    (out / "data" / "assets").mkdir()
+    before = _tree(out)
+    with pytest.raises(ValueError, match="was not written"):
+        _export(source, out)
+    assert _tree(out) == before
+
+
 # ----------------------------------------------- symlinks below the top level
 
 def _plant(out, tmp_path, kind):
@@ -541,6 +583,27 @@ def test_failed_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch
     _assert_hand_added_kept(out)
     _assert_clean_export(out)
     assert "did not finish" not in (out / "README.md").read_text()
+
+
+def test_failure_leaving_an_empty_directory_is_replaced_by_the_next_run(
+        source, tmp_path, monkeypatch):
+    """Re-review probe: a run that failed after creating an empty directory
+    under data/assets left debris every later run refused as foreign."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+
+    def boom(db, src, dest, *args, **kwargs):
+        (Path(dest) / "sub" / "deeper").mkdir(parents=True)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(longecho, "copy_retained_assets", boom)
+    with pytest.raises(OSError):
+        _export(source, out)
+    monkeypatch.undo()
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
 
 
 def test_failed_first_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch):
