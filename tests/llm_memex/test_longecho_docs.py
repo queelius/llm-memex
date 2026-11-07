@@ -211,12 +211,18 @@ def test_readme_word_query_prints_a_bounded_excerpt(tmp_path):
 
 
 def test_site_readme():
-    meta, body = _split(render_site_readme())
+    meta, body = _split(render_site_readme(site_has_data=True))
     assert meta["name"] == "llm-memex viewer"
     assert meta["description"]
     assert meta["generator"].startswith(GENERATOR_PREFIX + " ")
     assert "index.html" in body and "../data/conversations.db" in body
     assert "double-click" in body.lower()
+
+
+def test_site_readme_without_data_does_not_claim_a_copy():
+    _, body = _split(render_site_readme(site_has_data=False))
+    assert "db/" not in body
+    assert "too large" in body
 
 
 # --------------------------------------------------------- prepare_destination

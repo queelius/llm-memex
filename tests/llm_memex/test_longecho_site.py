@@ -246,6 +246,31 @@ def test_js_markdown_payloads_cannot_inject_attributes(tmp_path, kw):
 
 @needs_node
 @pytest.mark.parametrize("kw", [DEFAULT_KW, STRICT_KW], ids=["default", "strict"])
+def test_js_markdown_links_keep_balanced_parentheses(tmp_path, kw):
+    html = _run_viewer(
+        tmp_path,
+        'return ctx.renderMarkdown("[Foo](https://en.wikipedia.org/wiki/Foo_(bar)) end");',
+        **kw)
+    links = [a for t, a in _elements(html) if t == "a"]
+    assert links and links[0]["href"] == "https://en.wikipedia.org/wiki/Foo_(bar)"
+
+
+@needs_node
+@pytest.mark.parametrize("kw", [DEFAULT_KW, STRICT_KW], ids=["default", "strict"])
+def test_js_markdown_parentheses_do_not_open_script_urls(tmp_path, kw):
+    payloads = ["[a](javascript:alert(1))", "![a](javascript:alert(1))",
+                "[a](https://x/(y)onerror=alert(1))"]
+    rendered = _run_viewer(
+        tmp_path, f"return {json.dumps(payloads)}.map(ctx.renderMarkdown);", **kw)
+    for payload, html in zip(payloads, rendered):
+        for tag, attrs in _elements(html):
+            assert set(attrs) <= ALLOWED_ATTRS, (payload, html)
+            assert not any((v or "").lower().startswith("javascript:") for v in attrs.values()), \
+                (payload, html)
+
+
+@needs_node
+@pytest.mark.parametrize("kw", [DEFAULT_KW, STRICT_KW], ids=["default", "strict"])
 def test_js_markdown_still_renders_plain_links_and_images(tmp_path, kw):
     html = _run_viewer(
         tmp_path,

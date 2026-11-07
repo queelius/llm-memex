@@ -158,7 +158,7 @@ def render_root_readme(summary: ArchiveSummary) -> str:
         {"path": "data/conversations.db",
          "description": "All conversations and messages as a SQLite database"},
         {"path": "data/arkiv/conversations.jsonl",
-         "description": "The same messages as JSON Lines, one JSON object per line"},
+         "description": "The text of the same messages as JSON Lines, one JSON object per line"},
         {"path": SUMS_NAME,
          "description": "A checksum for every file, to confirm nothing has changed"},
     ]
@@ -240,8 +240,8 @@ def _root_body(summary: ArchiveSummary) -> str:
     add("   The tables are `conversations` (one row each) and `messages` "
         "(`conversation_id` points at the conversation). Message `content` is "
         "JSON text; the query above shows its first 300 characters.")
-    add("4. **Read the JSON Lines.** `data/arkiv/conversations.jsonl` has the same "
-        "messages, one JSON object per line, in a format called arkiv. "
+    add("4. **Read the JSON Lines.** `data/arkiv/conversations.jsonl` has the text "
+        "of the same messages, one JSON object per line, in a format called arkiv. "
         "`data/arkiv/README.md` and `data/arkiv/schema.yaml` describe it. Any "
         "tool that reads JSON can open it.")
     add("")
@@ -251,6 +251,9 @@ def _root_body(summary: ArchiveSummary) -> str:
 
     add("## What was left out")
     add("")
+    add("- `text/` and the JSON Lines carry the readable text of each message. "
+        "An AI agent's tool calls, tool results and thinking, where the "
+        "archive has them, are only in `data/conversations.db`.")
     if summary.include_archived:
         add("- Archived conversations are included, because the export was asked "
             "to keep them.")
@@ -284,8 +287,16 @@ def _root_body(summary: ArchiveSummary) -> str:
     return "\n".join(lines)
 
 
-def render_site_readme() -> str:
+def render_site_readme(*, site_has_data: bool) -> str:
     """README for the ``site/`` viewer, stamped so longecho sees it as a view."""
+    data_line = (
+        "It reads a copy of `../data/conversations.db` (stored here as the "
+        "script files in `db/`). "
+        if site_has_data else
+        "This archive is too large for the browser, so no copy of the database "
+        "is stored here: the page opens on a file picker. Read `../text/` or "
+        "query `../data/conversations.db` instead. "
+    )
     meta = {
         "name": "llm-memex viewer",
         "description": "A web page for browsing and searching the conversations "
@@ -298,9 +309,8 @@ def render_site_readme() -> str:
         "Double-click `index.html` to open the viewer in a web browser. It works "
         "offline, from the folder, with no server.\n"
         "\n"
-        "It reads a copy of `../data/conversations.db` (stored here as the "
-        "script files in `db/`). The archive's own README, one level up, "
-        "explains the rest.\n"
+        + data_line +
+        "The archive's own README, one level up, explains the rest.\n"
     )
     return _frontmatter(meta) + "\n" + body
 

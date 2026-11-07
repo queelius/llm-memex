@@ -21,6 +21,18 @@ _FTS5_TABLES = ("messages_fts", "notes_fts")
 _DB_GZIP_LEVEL = 6
 
 
+def _hidden_ids_sql(conn: sqlite3.Connection) -> str:
+    """SELECT of archived conversation ids plus everything descended from them."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}
+    archived = "SELECT id FROM conversations WHERE archived_at IS NOT NULL"
+    if "parent_conversation_id" not in columns:  # pre-v3 schema
+        return archived
+    return (
+        f"WITH RECURSIVE h(id) AS ({archived} UNION SELECT c.id FROM conversations c "
+        "JOIN h ON c.parent_conversation_id = h.id) SELECT id FROM h"
+    )
+
+
 def strip_fts5_and_vacuum(
     db_path: Path, *, drop_notes: bool = False, include_archived: bool = False
 ) -> None:
@@ -44,11 +56,16 @@ def strip_fts5_and_vacuum(
     read directly.
 
     Unless ``include_archived`` is true, soft-deleted conversations
-    (``archived_at IS NOT NULL``) and all their child rows are physically
-    removed from the copy. The SPA never references ``archived_at``, so a
-    conversation the user "deleted" before publishing would otherwise appear
-    in the home list, search, and librarian SQL of a public bundle. Treat
-    any exported HTML as potentially public.
+    (``archived_at IS NOT NULL``), the conversations descended from them
+    (subagent threads carry the prompts and files of the session that was
+    hidden), and all their child rows are physically removed from the copy.
+    The SPA never references ``archived_at``, so a conversation the user
+    "deleted" before publishing would otherwise appear in the home list,
+    search, and librarian SQL of a public bundle. Treat any exported HTML as
+    potentially public.
+
+    Orphaned notes (``conversation_id`` NULL, their conversation deleted) are
+    always removed: nothing in the bundle shows what they were written about.
 
     Sets ``PRAGMA journal_mode=DELETE`` on the copy so no -wal/-shm sidecar
     files are left next to the exported database when the process is
@@ -68,15 +85,15 @@ def strip_fts5_and_vacuum(
             # needs PRAGMA foreign_keys=ON set before any transaction) so it
             # is robust across schema versions and ON DELETE SET NULL on
             # notes (which would otherwise orphan a note's text in the copy).
-            archived = (
-                "(SELECT id FROM conversations WHERE archived_at IS NOT NULL)"
-            )
+            conn.execute(f"CREATE TEMP TABLE hidden AS {_hidden_ids_sql(conn)}")
             for tbl in ("messages", "tags", "enrichments", "provenance", "notes"):
                 with contextlib.suppress(sqlite3.OperationalError):
                     conn.execute(
-                        f"DELETE FROM {tbl} WHERE conversation_id IN {archived}"
+                        f"DELETE FROM {tbl} WHERE conversation_id IN (SELECT id FROM hidden)"
                     )
-            conn.execute("DELETE FROM conversations WHERE archived_at IS NOT NULL")
+            conn.execute("DELETE FROM conversations WHERE id IN (SELECT id FROM hidden)")
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute("DELETE FROM notes WHERE conversation_id IS NULL")
         if drop_notes:
             conn.execute("DROP TABLE IF EXISTS notes")
         conn.commit()
@@ -111,24 +128,43 @@ def media_urls(value) -> Iterator[str]:
             yield from media_urls(child)
 
 
+def _retained_asset(url: str, root: Path) -> tuple[Path, Path] | None:
+    """(source file, path under assets/) for a media URL, or None if it does
+    not name a real file inside ``root``. URLs come from imported content, so
+    a malformed one is skipped like a missing file, never fatal to the export.
+    """
+    try:
+        parsed = urlsplit(url)
+        relative = Path(unquote(parsed.path))
+        if parsed.scheme or parsed.netloc or relative.is_absolute():
+            return None
+        if not relative.parts or relative.parts[0] != "assets" or ".." in relative.parts:
+            return None
+        relative = Path(*relative.parts[1:])
+        src = (root / relative).resolve()
+        if not src.is_relative_to(root) or not src.is_file():
+            return None
+    except (ValueError, OSError):
+        return None
+    return src, relative
+
+
 def copy_retained_assets(db_path: Path, source: Path, destination: Path) -> None:
     """Copy only media referenced by the sanitized snapshot, within assets/."""
     if destination.exists():
         shutil.rmtree(destination)
     root = source.resolve()
+    seen: set[str] = set()
     with contextlib.closing(sqlite3.connect(db_path)) as conn:
         for (content,) in conn.execute("SELECT content FROM messages"):
             for url in media_urls(json.loads(content)):
-                parsed = urlsplit(url)
-                relative = Path(unquote(parsed.path))
-                if parsed.scheme or parsed.netloc or relative.is_absolute():
+                if url in seen:
                     continue
-                if not relative.parts or relative.parts[0] != "assets" or ".." in relative.parts:
+                seen.add(url)
+                asset = _retained_asset(url, root)
+                if asset is None:
                     continue
-                relative = Path(*relative.parts[1:])
-                src = (root / relative).resolve()
-                if not src.is_relative_to(root) or not src.is_file():
-                    continue
+                src, relative = asset
                 target = destination / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)

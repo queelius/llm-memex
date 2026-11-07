@@ -95,7 +95,7 @@ def test_media_rewritten_and_inline_placeholder():
     ]))
     out = render_conversation(conv, [])
     assert "](../../data/assets/x.png)" in out
-    assert "[inline image/png, 2 KB, shown in site/]" in out
+    assert "[inline image/png, 2 KB, kept in data/conversations.db]" in out
     assert "base64," not in out and data not in out
     assert "](https://example.com/y.png)" in out
 
@@ -107,7 +107,7 @@ def test_inline_data_url_and_small_size():
         media_block("image/gif", url=f"data:image/gif;base64,{tiny}"),
     ]))
     out = render_conversation(conv, [])
-    assert "[inline image/gif, <1 KB, shown in site/]" in out
+    assert "[inline image/gif, <1 KB, kept in data/conversations.db]" in out
     assert "base64," not in out
 
 
@@ -206,3 +206,10 @@ def test_index_sorts_naive_and_aware_times_together():
     ]
     out = render_index(entries)
     assert out.index("aware two pm") < out.index("naive noon") < out.index("aware ten am")
+
+
+def test_tool_only_turn_has_no_empty_role_line():
+    conv = _conv()
+    conv.add_message(Message(id="t", role="assistant",
+                             content=[{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]))
+    assert "**assistant**" not in render_conversation(conv, [])

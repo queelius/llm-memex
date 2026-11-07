@@ -672,7 +672,6 @@ def _cmd_export(args):
                 db=db,
                 include_notes=include_notes,
                 include_archived=include_archived,
-                owner=owner,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)

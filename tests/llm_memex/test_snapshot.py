@@ -8,6 +8,7 @@ import pytest
 from llm_memex.db import Database
 from llm_memex.exporters._snapshot import (
     check_destination,
+    copy_retained_assets,
     gzip_file,
     take_snapshot,
 )
@@ -86,3 +87,68 @@ def test_check_destination_resolves_symlinked_source_assets(tmp_path):
     (db_path.parent / "assets").symlink_to(out / "data" / "assets")
     with pytest.raises(ValueError, match="must not overwrite the source"):
         check_destination(db_path, out)
+
+
+def test_snapshot_drops_descendants_of_archived(tmp_path):
+    source = tmp_path / "source"
+    with Database(str(source)) as db:
+        db.save_conversation(_conversation("parent", archived=True))
+        for child, parent in (("sub", "parent"), ("subsub", "sub")):
+            conv = _conversation(child)
+            conv.parent_conversation_id = parent
+            db.save_conversation(conv)
+        db.save_conversation(_conversation("live"))
+    dest = tmp_path / "snap.db"
+    take_snapshot(source / "conversations.db", dest, include_notes=True, include_archived=False)
+    with sqlite3.connect(dest) as conn:
+        assert conn.execute("SELECT id FROM conversations").fetchall() == [("live",)]
+        assert conn.execute("SELECT DISTINCT conversation_id FROM messages").fetchall() == [("live",)]
+
+
+def test_snapshot_keeps_descendants_with_include_archived(tmp_path):
+    source = tmp_path / "source"
+    with Database(str(source)) as db:
+        db.save_conversation(_conversation("parent", archived=True))
+        conv = _conversation("sub")
+        conv.parent_conversation_id = "parent"
+        db.save_conversation(conv)
+    dest = tmp_path / "snap.db"
+    take_snapshot(source / "conversations.db", dest, include_notes=True, include_archived=True)
+    with sqlite3.connect(dest) as conn:
+        assert {r[0] for r in conn.execute("SELECT id FROM conversations")} == {"parent", "sub"}
+
+
+@pytest.mark.parametrize("include_archived", [False, True])
+def test_snapshot_drops_orphaned_notes(tmp_path, include_archived):
+    source = tmp_path / "source"
+    with Database(str(source)) as db:
+        db.save_conversation(_conversation("kept"))
+        db.save_conversation(_conversation("deleted"))
+        db.add_note(conversation_id="deleted", text="ORPHAN-TEXT")
+        db.add_note(conversation_id="kept", text="KEPT-TEXT")
+        db.delete_conversation("deleted")
+    dest = tmp_path / "snap.db"
+    take_snapshot(source / "conversations.db", dest, include_notes=True,
+                  include_archived=include_archived)
+    with sqlite3.connect(dest) as conn:
+        assert conn.execute("SELECT text FROM notes").fetchall() == [("KEPT-TEXT",)]
+
+
+@pytest.mark.parametrize("bad_url", [
+    "https://[broken/x.png", "assets/a%00b.png", "assets/" + "a" * 300 + ".png",
+])
+def test_malformed_media_url_is_skipped_not_fatal(tmp_path, bad_url):
+    source = tmp_path / "source"
+    (source / "assets").mkdir(parents=True)
+    (source / "assets" / "real.png").write_bytes(b"x")
+    now = datetime(2026, 10, 29)
+    conv = Conversation("c", now, now)
+    conv.add_message(Message(id="m", role="user", content=[
+        {"type": "media", "url": bad_url},
+        {"type": "media", "url": "assets/real.png"},
+    ]))
+    with Database(str(source)) as db:
+        db.save_conversation(conv)
+    dest = tmp_path / "out"
+    copy_retained_assets(source / "conversations.db", source / "assets", dest)
+    assert [p.name for p in dest.iterdir()] == ["real.png"]

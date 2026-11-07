@@ -392,5 +392,5 @@ def _write_site(
     )
     run.record(copy_sql_js(site_dir))
     run.record(write_wasm_script(site_dir))
-    run.will_write("site", README_NAME).write_text(render_site_readme(), encoding="utf-8")
+    run.will_write("site", README_NAME).write_text(render_site_readme(site_has_data=chunks > 0), encoding="utf-8")
     return chunks

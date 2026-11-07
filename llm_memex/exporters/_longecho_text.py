@@ -75,7 +75,7 @@ def _rewrite_block(block: ContentBlock) -> ContentBlock:
     inline = _inline_payload(block)
     if inline is not None:
         media_type, nbytes = inline
-        return text_block(f"[inline {media_type or 'media'}, {_size_label(nbytes)}, shown in site/]")
+        return text_block(f"[inline {media_type or 'media'}, {_size_label(nbytes)}, kept in data/conversations.db]")
     url = block.get("url") or ""
     if url.startswith(_ASSETS_PREFIX):
         return {**block, "url": _ASSETS_FROM_TEXT + url[len(_ASSETS_PREFIX):]}
@@ -138,7 +138,9 @@ def render_conversation(conv: Conversation, notes: List[Dict[str, Any]]) -> str:
             blocks.append(_fork_line(conv.messages.get(fresh[0].parent_id)))
         for msg in fresh:
             emitted.add(msg.id)
-            blocks.append(f"**{msg.role}**: {_message_md(msg)}")
+            body = _message_md(msg)
+            if body.strip():  # a tool-only turn has no readable text
+                blocks.append(f"**{msg.role}**: {body}")
             blocks.extend(_note_md(n) for n in msg_notes.get(msg.id, []))
     return "\n\n".join(blocks) + "\n"
 

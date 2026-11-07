@@ -2078,18 +2078,18 @@ function renderMarkdown(text) {
     tags.push(html);
     return "\x00TG" + (tags.length - 1) + "\x00";
   };
-  /* Quotes, whitespace, brackets, angle brackets, backticks, and
+  /* Quotes, whitespace, square and angle brackets, backticks, and
      placeholders never belong in a link or image URL: leave it as text. */
-  var urlOk = function(url) { return !/["\'\s\[\]()<>`\x00]/.test(url); };
+  var urlOk = function(url) { return !/["\'\s\[\]<>`\x00]/.test(url); };
 
   /* Images: ![alt](url) */
-  text = text.replace(/!\[([^\]]*)]\(([^)]+)\)/g, function(m, alt, url) {
+  text = text.replace(/!\[([^\]]*)]\(((?:[^()]|\([^()]*\))+)\)/g, function(m, alt, url) {
     if (/^(https?:|data:image\/|assets\/)/.test(url) && urlOk(url)) return keepTag('<img src="' + escAttr(url) + '" alt="' + escAttr(alt) + '" loading="lazy">');
     return m;
   });
 
   /* Links: [text](url) */
-  text = text.replace(/\[([^\]]+)]\(([^)]+)\)/g, function(m, text2, url) {
+  text = text.replace(/\[([^\]]+)]\(((?:[^()]|\([^()]*\))+)\)/g, function(m, text2, url) {
     if (/^(https?:|mailto:|#)/.test(url) && urlOk(url)) return keepTag('<a href="' + escAttr(url) + '" target="_blank" rel="noopener noreferrer">') + text2 + '</a>';
     return m;
   });
