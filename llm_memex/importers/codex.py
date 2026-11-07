@@ -14,10 +14,13 @@ layout changes):
   ``{"timestamp", "type", "payload", "ordinal"?}``; the first is
   ``session_meta`` (thread id, cwd, git, cli_version, source).
 
-This importer keeps the **conversation skeleton**, like ``claude_code``:
-user and assistant messages (text and images). Tool calls, reasoning
-(encrypted), developer instructions, inter-agent messages, token counts and
-UI events are skipped. ``event_msg`` records are a UI event stream that
+By default this importer keeps the **conversation skeleton**, like
+``claude_code``: user and assistant messages (text and images). Tool calls,
+reasoning, developer instructions, inter-agent messages, token counts and
+UI events are skipped. ``codex_full`` reads the same files with
+``full=True`` (see :func:`_full_entry`), adding tool calls and their
+output, readable reasoning summaries and inter-agent messages, one message
+per record. ``event_msg`` records are a UI event stream that
 repeats the transcript, so only ``response_item`` messages are imported;
 the stream's user messages are still read, as the record of what was
 actually submitted as a user turn (see :func:`_is_client_context`).
@@ -54,7 +57,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from llm_memex.importers import parse_timestamp
-from llm_memex.models import Conversation, Message, media_block, text_block
+from llm_memex.models import (
+    Conversation,
+    Message,
+    media_block,
+    text_block,
+    thinking_block,
+    tool_result_block,
+    tool_use_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +321,7 @@ def _submitted_texts(payload: Dict[str, Any]) -> List[str]:
 
 @dataclass
 class _Entry:
-    """A user/assistant message as read, before client context is removed."""
+    """A message as read, before client context is removed."""
 
     role: str
     parts: Any
@@ -318,6 +329,11 @@ class _Entry:
     ordinal: Optional[int]
     key: str
     model: Optional[str]
+    # The response item's type; only "message" entries hold human turns.
+    kind: str = "message"
+    # Content already converted (full mode, non-message records).
+    blocks: Optional[List[Dict[str, Any]]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -363,7 +379,9 @@ def _load_segments(paths: List[str], skipped: Counter) -> List[_Segment]:
     return segments
 
 
-def _read_segment(seg: _Segment, skipped: Counter, context: Dict[str, Any]) -> None:
+def _read_segment(
+    seg: _Segment, skipped: Counter, context: Dict[str, Any], full: bool = False
+) -> None:
     """Stream one segment into ``seg.entries`` and ``seg.submitted``."""
     records = _iter_records(seg.path, skipped)
     next(records, None)  # the header, already read into seg.meta
@@ -400,25 +418,36 @@ def _read_segment(seg: _Segment, skipped: Counter, context: Dict[str, Any]) -> N
             ordinal = ordinal if isinstance(ordinal, int) else None
         if ts:
             context["last_ts"] = ts
-        if item.get("type") != "message":
-            skipped[f"response_item/{item.get('type')}"] += 1
+        ts = ts if isinstance(ts, str) else None
+        # Distinct prefixes: an ordinal and a line number never collide.
+        key = f"o{ordinal}" if ordinal is not None else f"l{i}"
+        itype = item.get("type")
+        if itype != "message":
+            entry = _full_entry(item, ts, ordinal, key, context, skipped) if full else None
+            if entry is not None:
+                seg.entries.append(entry)
+            elif not full:
+                skipped[f"response_item/{itype}"] += 1
             continue
         role = item.get("role")
         if role not in ("user", "assistant"):
             skipped[f"message/{role}"] += 1
             continue
+        phase = item.get("phase")
         seg.entries.append(_Entry(
             role=role,
             parts=item.get("content"),
-            ts=ts if isinstance(ts, str) else None,
+            ts=ts,
             ordinal=ordinal,
-            # Distinct prefixes: an ordinal and a line number never collide.
-            key=f"o{ordinal}" if ordinal is not None else f"l{i}",
+            key=key,
             model=context.get("model") if role == "assistant" else None,
+            metadata={"phase": phase} if full and isinstance(phase, str) else {},
         ))
 
 
 def _content_blocks(entry: _Entry, submitted: Set[str]) -> List[Dict[str, Any]]:
+    if entry.blocks is not None:
+        return entry.blocks
     blocks: List[Dict[str, Any]] = []
     if not isinstance(entry.parts, list):
         return blocks
@@ -439,6 +468,112 @@ def _content_blocks(entry: _Entry, submitted: Set[str]) -> List[Dict[str, Any]]:
             if block is not None:
                 blocks.append(block)
     return blocks
+
+
+def _part_blocks(parts: Any) -> List[Dict[str, Any]]:
+    """Text and inline images from a list of ``input_text``/``input_image`` parts."""
+    blocks: List[Dict[str, Any]] = []
+    for part in parts if isinstance(parts, list) else []:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if part.get("type") in ("input_text", "output_text") and isinstance(text, str):
+            if text.strip():
+                blocks.append(text_block(text))
+        elif part.get("type") == "input_image" and isinstance(part.get("image_url"), str):
+            block = _data_url_block(part["image_url"])
+            if block is not None:
+                blocks.append(block)
+    return blocks
+
+
+def _tool_input(item: Dict[str, Any]) -> Dict[str, Any]:
+    """A tool call's input as a dict, as ``tool_use`` blocks carry it.
+
+    ``function_call`` arguments are a JSON object in a string; a custom
+    tool's (``exec``, ``apply_patch``) input is free text, kept under
+    ``input``. Arguments that do not parse to an object are kept verbatim.
+    """
+    if item.get("type") == "custom_tool_call":
+        return {"input": item.get("input")}
+    raw = item.get("arguments")
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        parsed = None
+    return parsed if isinstance(parsed, dict) else {"arguments": raw}
+
+
+def _full_entry(
+    item: Dict[str, Any],
+    ts: Optional[str],
+    ordinal: Optional[int],
+    key: str,
+    context: Dict[str, Any],
+    skipped: Counter,
+) -> Optional[_Entry]:
+    """A non-message response item as an entry (full mode), or None if skipped.
+
+    - ``function_call`` / ``custom_tool_call``: an assistant ``tool_use``,
+      its id the ``call_id`` the output refers to.
+    - ``function_call_output`` / ``custom_tool_call_output``: a ``tool_result``
+      in a user-role message, the convention ``claude_code_full`` follows.
+    - ``reasoning``: its readable summary as ``thinking``; most reasoning is
+      only ``encrypted_content``, which cannot be read and is counted.
+    - ``agent_message``: an inter-agent message into this thread (in every
+      thread on record its author is another agent), as a user-role message
+      with ``agent_author``/``agent_recipient`` in its metadata.
+
+    Anything else (``additional_tools``, ``compaction``, new types) is counted.
+    """
+    itype = str(item.get("type"))
+    role: Optional[str] = None
+    blocks: List[Dict[str, Any]] = []
+    metadata: Dict[str, Any] = {}
+    if itype in ("function_call", "custom_tool_call"):
+        role = "assistant"
+        call_id = item.get("call_id") or item.get("id") or ""
+        block = tool_use_block(id=str(call_id), name=str(item.get("name") or ""),
+                               input=_tool_input(item))
+        if isinstance(item.get("namespace"), str) and item["namespace"]:
+            block["namespace"] = item["namespace"]
+        blocks = [block]
+    elif itype in ("function_call_output", "custom_tool_call_output"):
+        role = "user"
+        output = item.get("output")
+        content = _part_blocks(output) if isinstance(output, list) else output
+        blocks = [tool_result_block(tool_use_id=str(item.get("call_id") or ""),
+                                    content=content)]
+    elif itype == "reasoning":
+        role = "assistant"
+        parts = [
+            part for key in ("summary", "content")
+            if isinstance(item.get(key), list) for part in item[key]
+        ]
+        for part in parts:
+            text = part.get("text") if isinstance(part, dict) else None
+            if isinstance(text, str) and text.strip():
+                blocks.append(thinking_block(text))
+        if not blocks:
+            skipped["response_item/reasoning:encrypted"] += 1
+            return None
+    elif itype == "agent_message":
+        role = "user"
+        blocks = _part_blocks(item.get("content"))
+        for field_name in ("author", "recipient"):
+            if isinstance(item.get(field_name), str):
+                metadata[f"agent_{field_name}"] = item[field_name]
+        if not blocks:
+            skipped["response_item/agent_message:encrypted"] += 1
+            return None
+    else:
+        skipped[f"response_item/{itype}"] += 1
+        return None
+    return _Entry(
+        role=role, parts=None, ts=ts, ordinal=ordinal, key=key,
+        model=context.get("model") if role == "assistant" else None,
+        kind=itype, blocks=blocks, metadata=metadata,
+    )
 
 
 def _fork_parent(segments: List[_Segment], k: int) -> Optional[str]:
@@ -502,7 +637,9 @@ def _title_text(blocks: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def _import_thread(paths: List[str], skipped: Counter) -> Optional[Conversation]:
+def _import_thread(
+    paths: List[str], skipped: Counter, full: bool = False
+) -> Optional[Conversation]:
     segments = _load_segments(paths, skipped)
     if not segments:
         return None
@@ -516,14 +653,14 @@ def _import_thread(paths: List[str], skipped: Counter) -> Optional[Conversation]
     seen_ids: Set[str] = set()
     first_user_text: Optional[str] = None
     for k, seg in enumerate(segments):
-        _read_segment(seg, skipped, context)
+        _read_segment(seg, skipped, context, full)
         parent = _fork_parent(segments, k)
         for entry in seg.entries:
             blocks = _content_blocks(entry, seg.submitted)
             if not blocks:
                 skipped[f"message/{entry.role}:no content"] += 1
                 continue
-            if entry.role == "user" and first_user_text is None:
+            if entry.role == "user" and entry.kind == "message" and first_user_text is None:
                 first_user_text = _title_text(blocks)
             msg_id = f"{thread_id}:{seg.key}:{entry.key}"
             if msg_id in seen_ids:  # a repeated ordinal; never overwrite
@@ -540,6 +677,7 @@ def _import_thread(paths: List[str], skipped: Counter) -> Optional[Conversation]
                 parent_id=parent if parent != msg_id else None,
                 model=entry.model,
                 created_at=parse_timestamp(entry.ts) if entry.ts else None,
+                metadata=entry.metadata,
             ))
             seg.messages.append((entry.ordinal, msg_id))
             parent = msg_id
@@ -574,7 +712,7 @@ def _import_thread(paths: List[str], skipped: Counter) -> Optional[Conversation]
     for msg in messages:
         conv.add_message(msg)
 
-    conv.metadata["importer_mode"] = "conversation_only"
+    conv.metadata["importer_mode"] = "full" if full else "conversation_only"
     git = meta.get("git") if isinstance(meta.get("git"), dict) else {}
     # cwd/branch: where the thread started; client_version: the newest
     # client that wrote to it (the latest segment's header).
@@ -604,7 +742,7 @@ def _import_thread(paths: List[str], skipped: Counter) -> Optional[Conversation]
     if len(segments) > 1:
         conv.metadata["source_files"] = [s.path for s in segments]
     conv.metadata["_provenance"] = {
-        "source_type": "codex",
+        "source_type": "codex_full" if full else "codex",
         "source_file": segments[0].path,
         "source_id": thread_id,
         # One layout per thread in practice; a thread resumed across a
@@ -647,8 +785,11 @@ def _parents_first(convs: List[Conversation]) -> List[Conversation]:
     return ordered
 
 
-def import_path(path: str) -> List[Conversation]:
+def import_path(path: str, *, full: bool = False) -> List[Conversation]:
     """Import one rollout file, or every rollout file under a directory.
+
+    *full* keeps tool calls, reasoning summaries and inter-agent messages
+    (the ``codex_full`` importer); the default keeps the conversation only.
 
     Threads are always assembled whole: when *path* lies inside a Codex
     home (``<home>/sessions/...``), the other segments of each thread found
@@ -667,7 +808,7 @@ def import_path(path: str) -> List[Conversation]:
     convs: List[Conversation] = []
     for tid, paths in threads.items():
         try:
-            conv = _import_thread(paths, skipped)
+            conv = _import_thread(paths, skipped, full)
         except Exception as e:  # one malformed thread must not sink the batch
             skipped["<thread failed>"] += 1
             logger.warning("Skipping Codex thread %s (%s): %s", tid, paths[0], e)
@@ -676,7 +817,8 @@ def import_path(path: str) -> List[Conversation]:
             convs.append(conv)
     if skipped:
         logger.info(
-            "Codex import: %d conversation(s); skipped records by type: %s",
+            "Codex%s import: %d conversation(s); skipped records by type: %s",
+            " (full)" if full else "",
             len(convs), dict(skipped.most_common()),
         )
     return _parents_first(convs)

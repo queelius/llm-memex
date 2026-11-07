@@ -580,10 +580,10 @@ def _auto_import(file_path, format_name=None, exit_on_fail=True):
         return _run_import_path(
             format_name, importers[format_name]["module"], file_path, exit_on_fail
         )
-    # Preferred order: claude_code_full wins over claude_code when both
-    # detect (both share the same detect function, so otherwise the
-    # alphabetically-earlier skeleton importer would always win).
-    _PREFERRED = ("claude_code_full",)
+    # Preferred order: the full-fidelity importers win over their
+    # conversation-only twins when both detect (each pair shares one detect
+    # function, so otherwise the alphabetically-earlier skeleton would win).
+    _PREFERRED = ("claude_code_full", "codex_full")
     ordered = list(_PREFERRED) + [
         n for n in importers.keys() if n not in _PREFERRED
     ]

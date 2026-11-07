@@ -270,7 +270,9 @@ class TestCLIImportCodex:
             prov = db.get_provenance("parent")[0]
         assert row["parent_conversation_id"] == "parent"
         assert prov["source_format"] == "codex-rollout/2"
-        assert prov["importer_version"].startswith("codex@")
+        # Like Claude Code, autodetect prefers the full-fidelity importer.
+        assert prov["importer_version"].startswith("codex_full@")
+        assert prov["source_type"] == "codex_full"
         second = subprocess.run(cmd, capture_output=True, text=True, check=True)
         assert "Imported 0 conversation(s)" in second.stdout
         assert "2 unchanged" in second.stdout

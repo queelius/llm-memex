@@ -2366,10 +2366,10 @@ class TestCodexSplitThreads:
         _cx_write(tmp_path / "b.jsonl", _cx_v2_session("bad"))
         real = codex_mod._import_thread
 
-        def flaky(paths, skipped):
+        def flaky(paths, skipped, *args):
             if "b.jsonl" in paths[0]:
                 raise TypeError("an unforeseen shape")
-            return real(paths, skipped)
+            return real(paths, skipped, *args)
         monkeypatch.setattr(codex_mod, "_import_thread", flaky)
         assert [c.id for c in codex_import(str(tmp_path))] == ["good"]
 
@@ -2431,6 +2431,138 @@ class TestCodexTitlesAndSubagents:
         orphan = {c.id: c for c in codex_import(str(self._home(tmp_path)))}["orphan"]
         assert orphan.parent_conversation_id is None
         assert orphan.metadata["parent_thread_id"] == "pruned"
+
+
+class TestCodexFull:
+    """codex_full: the same threads, plus tool calls, reasoning and agent messages."""
+
+    def _session(self):
+        return [
+            _cx_meta("th-f"),
+            _cx("turn_context", {"model": "gpt-5.5"}, 1),
+            _cx_msg("user", "Run the tests", 2),
+            _cx("response_item", {"type": "reasoning", "encrypted_content": "gAAA",
+                                  "summary": [{"type": "summary_text",
+                                               "text": "**Planning** run pytest"}]}, 3),
+            _cx("response_item", {"type": "reasoning", "summary": [],
+                                  "encrypted_content": "gAAA"}, 4),
+            _cx("response_item", {"type": "function_call", "name": "exec_command",
+                                  "arguments": '{"cmd": "pytest -q"}', "call_id": "c1"}, 5),
+            _cx("response_item", {"type": "function_call_output", "call_id": "c1",
+                                  "output": "3 passed"}, 6),
+            _cx("response_item", {"type": "function_call", "name": "send_message",
+                                  "namespace": "collaboration", "arguments": "not json",
+                                  "call_id": "c2"}, 7),
+            _cx("response_item", {"type": "custom_tool_call", "name": "apply_patch",
+                                  "input": "*** Begin Patch", "call_id": "c3",
+                                  "status": "completed"}, 8),
+            _cx("response_item", {"type": "custom_tool_call_output", "call_id": "c3",
+                                  "output": [
+                                      {"type": "input_text", "text": "Success"},
+                                      {"type": "input_image",
+                                       "image_url": "data:image/png;base64,iVBO"}]}, 9),
+            _cx("response_item", {"type": "agent_message", "author": "/root/ada",
+                                  "recipient": "/root", "content": [
+                                      {"type": "input_text", "text": "audit done"},
+                                      {"type": "encrypted_content", "data": "x"}]}, 10),
+            _cx("response_item", {"type": "agent_message", "author": "/root/ada",
+                                  "recipient": "/root", "content": [
+                                      {"type": "encrypted_content", "data": "x"}]}, 11),
+            _cx("response_item", {"type": "additional_tools", "tools": []}, 12),
+            _cx("response_item", {"type": "message", "role": "assistant", "phase": "final_answer",
+                                  "content": [{"type": "output_text", "text": "All green."}]}, 13),
+        ]
+
+    def _import(self, tmp_path, full=True):
+        from llm_memex.importers import codex_full
+        f = _cx_write(tmp_path / "r.jsonl", self._session())
+        convs = codex_full.import_path(str(f)) if full else codex_import(str(f))
+        assert len(convs) == 1
+        return convs[0]
+
+    def test_one_message_per_record_in_order(self, tmp_path):
+        conv = self._import(tmp_path)
+        path = conv.get_all_paths()[0]
+        kinds = [(m.role, [b["type"] for b in m.content]) for m in path]
+        assert kinds == [
+            ("user", ["text"]), ("assistant", ["thinking"]),
+            ("assistant", ["tool_use"]), ("user", ["tool_result"]),
+            ("assistant", ["tool_use"]), ("assistant", ["tool_use"]),
+            ("user", ["tool_result"]), ("user", ["text"]), ("assistant", ["text"]),
+        ]
+        assert all(m.model == "gpt-5.5" for m in path if m.role == "assistant")
+        assert path[1].content[0]["text"] == "**Planning** run pytest"
+
+    def test_tool_calls_and_results_pair_by_call_id(self, tmp_path):
+        blocks = [b for m in self._import(tmp_path).get_all_paths()[0] for b in m.content]
+        uses = {b["id"]: b for b in blocks if b["type"] == "tool_use"}
+        results = {b["tool_use_id"]: b for b in blocks if b["type"] == "tool_result"}
+        assert uses["c1"]["name"] == "exec_command"
+        assert uses["c1"]["input"] == {"cmd": "pytest -q"}
+        assert results["c1"]["content"] == "3 passed"
+        # Unparseable arguments are kept verbatim; the namespace travels too.
+        assert uses["c2"]["input"] == {"arguments": "not json"}
+        assert uses["c2"]["namespace"] == "collaboration"
+        # A custom tool's free-text input, and list output with an image.
+        assert uses["c3"]["input"] == {"input": "*** Begin Patch"}
+        assert [b["type"] for b in results["c3"]["content"]] == ["text", "media"]
+
+    def test_agent_messages_and_phase_in_metadata(self, tmp_path):
+        path = self._import(tmp_path).get_all_paths()[0]
+        agent = [m for m in path if "agent_author" in m.metadata]
+        assert len(agent) == 1  # the all-encrypted one is skipped
+        assert agent[0].get_text() == "audit done"
+        assert agent[0].metadata == {"agent_author": "/root/ada", "agent_recipient": "/root"}
+        assert path[-1].metadata == {"phase": "final_answer"}
+
+    def test_provenance_and_mode(self, tmp_path):
+        conv = self._import(tmp_path)
+        assert conv.metadata["importer_mode"] == "full"
+        assert conv.metadata["_provenance"]["source_type"] == "codex_full"
+        assert conv.source == "codex" and conv.title == "Run the tests"
+
+    def test_same_ids_as_conversation_only(self, tmp_path):
+        """The two importers name the shared messages alike (Claude Code's pair
+        does too), so one thread reads as the same record in both databases."""
+        full = self._import(tmp_path)
+        (tmp_path / "skeleton").mkdir()
+        f = _cx_write(tmp_path / "skeleton" / "r.jsonl", self._session())
+        skeleton = codex_import(str(f))[0]
+        assert skeleton.id == full.id
+        assert set(skeleton.messages) <= set(full.messages)
+        assert skeleton.metadata["importer_mode"] == "conversation_only"
+        assert all(b["type"] == "text" for m in skeleton.messages.values() for b in m.content)
+
+    def test_agent_message_task_does_not_become_title(self, tmp_path):
+        """A spawned subagent's task arrives as an agent message: the title
+        rule is the conversation-only importer's (nickname, not the task)."""
+        from llm_memex.importers import codex_full
+        records = [
+            _cx_meta("sub", source={"subagent": {"thread_spawn": {
+                "parent_thread_id": "p", "depth": 1, "agent_nickname": "Ada",
+                "agent_role": "explorer"}}}),
+            _cx("response_item", {"type": "agent_message", "author": "/root",
+                                  "recipient": "/root/ada", "content": [
+                                      {"type": "input_text", "text": "audit the proofs"}]}, 1),
+            _cx_msg("assistant", "done", 2),
+        ]
+        conv = codex_full.import_path(str(_cx_write(tmp_path / "r.jsonl", records)))[0]
+        assert conv.title == "Subagent Ada (explorer)"
+        assert [m.get_text() for m in conv.get_all_paths()[0]] == ["audit the proofs", "done"]
+
+    def test_odd_reasoning_shapes_do_not_sink_the_thread(self, tmp_path):
+        from llm_memex.importers import codex_full
+        records = [
+            _cx_meta("odd"), _cx_msg("user", "go", 1),
+            _cx("response_item", {"type": "reasoning", "summary": "not a list",
+                                  "content": [{"type": "reasoning_text", "text": "raw"}]}, 2),
+            _cx("response_item", {"type": "function_call_output", "call_id": "z",
+                                  "output": {"weird": True}}, 3),
+        ]
+        conv = codex_full.import_path(str(_cx_write(tmp_path / "r.jsonl", records)))[0]
+        path = conv.get_all_paths()[0]
+        assert path[1].content == [{"type": "thinking", "text": "raw"}]
+        assert path[2].content[0]["content"] == {"weird": True}
 
 
 # ── GitHub Copilot Chat (VS Code) ─────────────────────────────
