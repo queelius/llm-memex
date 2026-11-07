@@ -5,7 +5,9 @@ import argparse
 import importlib.util
 import os
 import sys
-from pathlib import Path
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
 
 
 def _load_cli_config():
@@ -201,7 +203,17 @@ def _cmd_import(args):
     db_path = _resolve_db_path(args.db or _default_db())
     file_path = Path(args.file).resolve()
 
-    if file_path.is_dir():
+    if _is_platform_export_zip(file_path):
+        with tempfile.TemporaryDirectory(prefix="llm-memex-import-") as tmp, \
+                zipfile.ZipFile(file_path) as bundle:
+            bundle.extractall(tmp)
+            convs = _auto_import(tmp, args.format)
+            for conv in convs:
+                conv.metadata.get("_provenance", {})["source_file"] = str(file_path)
+            with Database(db_path) as db:
+                n_imp, n_unch = _save_convs(convs, Path(tmp), args, db)
+                _print_import_result(n_imp, n_unch, db_path)
+    elif file_path.is_dir():
         # Try importers directly on the directory first
         convs = _auto_import(str(file_path), args.format, exit_on_fail=False)
         if convs is not None:
@@ -282,6 +294,53 @@ def _materialize_arkiv_notes(conv, db):
         db.merge_notes(notes)
 
 
+def _is_platform_export_zip(path):
+    """True for a zip holding a platform export's conversations*.json at its
+    root (arkiv bundles hold conversations.jsonl and read their own zips)."""
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            return any(
+                PurePosixPath(name).match("conversations*.json")
+                and "/" not in name
+                for name in bundle.namelist()
+            )
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def _keep_existing_content(old, new):
+    """True when the stored message should keep its content: its media was
+    already copied in, or the new read has nothing readable to replace it."""
+    if any(b.get("type") == "media" and str(b.get("url", "")).startswith("assets/")
+           for b in old.content):
+        return True
+    return not any(b.get("type") != "text" or (b.get("text") or "").strip()
+                   for b in new.content)
+
+
+def _keep_missing_messages(conv, db):
+    """Fold the stored copy of *conv* into it, for a source that may omit what
+    an earlier export held. Stored messages the source no longer has stay, and
+    stored messages keep their parents, so the tree around them stays whole."""
+    existing = db.load_conversation(conv.id)
+    if existing is None:
+        return
+    incoming = conv.messages
+    conv.messages, conv.root_ids, conv._children = {}, [], {}
+    for msg_id, old in existing.messages.items():
+        new = incoming.get(msg_id)
+        if new is None:
+            conv.add_message(old)
+            continue
+        new.parent_id = old.parent_id
+        if _keep_existing_content(old, new):
+            new.content = old.content
+        conv.add_message(new)
+    for msg_id, new in incoming.items():
+        if msg_id not in existing.messages:
+            conv.add_message(new)
+
+
 def _save_convs(convs, source_path, args, db):
     """Save imported conversations to the database.
 
@@ -346,6 +405,8 @@ def _save_convs(convs, source_path, args, db):
         # Skip-if-unchanged check (bypass with --force). With provenance, a
         # row read by an older importer revision counts as changed.
         prov = conv.metadata.pop("_provenance", None)
+        if prov and prov.get("keep_missing_messages"):
+            _keep_missing_messages(conv, db)
         prov_check = (
             {"source_type": prov.get("source_type", "unknown"),
              "importer_version": prov.get("importer_version")}

@@ -1,5 +1,7 @@
-"""Import OpenAI conversation exports (conversations.json)."""
+"""Import OpenAI conversation exports (conversations.json or conversations-NNN.json)."""
 import json
+import logging
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,13 +12,23 @@ from llm_memex.models import (
     Message,
     media_block,
     text_block,
+    thinking_block,
     tool_result_block,
     tool_use_block,
 )
 
+logger = logging.getLogger(__name__)
+
 # Bump when a change makes this importer read the same source differently;
 # conversations stamped with an older revision are re-imported (cli.py).
-IMPORTER_REVISION = 1
+IMPORTER_REVISION = 2
+
+# Layouts, told apart by structure: /1 is one conversations.json with media as
+# loose files; /2 has an export_manifest.json, conversations-NNN.json shards and
+# media as <id>.dat. /2 omits system and tool nodes and re-links the tree around
+# them, so re-importing must keep what an earlier export held (cli.py).
+_LAYOUT_SINGLE = "openai-export/1"
+_LAYOUT_SHARDED = "openai-export/2"
 
 
 def _detect_file(path: str) -> bool:
@@ -36,34 +48,54 @@ def detect(path: str) -> bool:
     """Check if path is an OpenAI export file or directory containing one."""
     p = Path(path)
     if p.is_dir():
-        candidate = p / "conversations.json"
-        return candidate.exists() and _detect_file(str(candidate))
+        return any(_detect_file(str(f)) for f in _conversation_files(p))
     return _detect_file(path)
+
+
+def _conversation_files(directory: Path) -> List[Path]:
+    return sorted(f for f in directory.glob("conversations*.json") if f.is_file())
 
 
 def import_path(path: str) -> List[Conversation]:
     """Import conversations from an OpenAI export file or directory."""
     p = Path(path)
-    if p.is_dir():
-        return _import_file(str(p / "conversations.json"))
-    return _import_file(path)
+    files = _conversation_files(p) if p.is_dir() else [p]
+    if not files:
+        raise FileNotFoundError(f"no conversations*.json in {path}")
+    skipped: Counter = Counter()
+    conversations: Dict[str, Conversation] = {}
+    for file in files:
+        for conv in _import_file(str(file), skipped):
+            conversations[conv.id] = conv
+    if skipped:
+        logger.info(
+            "OpenAI import: %d conversation(s); skipped content by type: %s",
+            len(conversations), dict(skipped.most_common()),
+        )
+    return list(conversations.values())
 
 
-def _import_file(path: str) -> List[Conversation]:
+def _import_file(path: str, skipped: Optional[Counter] = None) -> List[Conversation]:
     """Import conversations from a single OpenAI export file."""
     with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     if not isinstance(data, list):
         data = [data]
+    layout = _LAYOUT_SHARDED if (Path(path).parent / "export_manifest.json").exists() else _LAYOUT_SINGLE
     conversations = []
     for item in data:
-        conv = _import_conversation(item, path)
+        conv = _import_conversation(item, path, skipped, layout)
         if conv:
             conversations.append(conv)
     return conversations
 
 
-def _import_conversation(data: dict, source_path: str = None) -> Optional[Conversation]:
+def _import_conversation(
+    data: dict,
+    source_path: str = None,
+    skipped: Optional[Counter] = None,
+    layout: str = _LAYOUT_SINGLE,
+) -> Optional[Conversation]:
     conv_id = data.get("id") or data.get("conversation_id", "")
     mapping = data.get("mapping", {})
     if not isinstance(mapping, dict):
@@ -87,6 +119,9 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
         source="openai",
         created_at=created,
         updated_at=updated,
+        starred_at=updated if data.get("is_starred") else None,
+        pinned_at=parse_timestamp(data["pinned_time"]) if data.get("pinned_time") else None,
+        archived_at=updated if data.get("is_archived") else None,
     )
     model = None
     for node_id, node in mapping.items():
@@ -104,7 +139,7 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
             isinstance(content_obj, dict) and content_obj.get("parts")
         ):
             continue
-        content = _extract_content(msg_data)
+        content = _extract_content(msg_data, skipped)
         if not content:
             content = [text_block("")]
         metadata = msg_data.get("metadata") or {}
@@ -129,16 +164,59 @@ def _import_conversation(data: dict, source_path: str = None) -> Optional[Conver
             ),
         )
         conv.add_message(msg)
-    conv.model = model
+    conv.model = model or data.get("default_model_slug")
     conv.metadata["_provenance"] = {
         "source_type": "openai",
         "source_file": source_path,
         "source_id": conv_id,
+        "source_format": layout,
+        "keep_missing_messages": True,
     }
     return conv
 
 
-def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
+def _pointer_media_type(part: dict) -> str:
+    kind = str(part.get("content_type", ""))
+    if "audio" in kind:
+        return f"audio/{part.get('format') or 'wav'}"
+    if "video" in kind:
+        return "video/mp4"
+    return "image/png"
+
+
+def _pointer_blocks(part: dict) -> List[Dict[str, Any]]:
+    """Media blocks for an asset pointer part, including the pointers nested in a
+    voice-mode part (``audio_asset_pointer``, ``frames_asset_pointers``, ...)."""
+    blocks = []
+    if part.get("asset_pointer"):
+        blocks.append(media_block(_pointer_media_type(part), url=part["asset_pointer"]))
+    for key, value in part.items():
+        if not (key.endswith("asset_pointer") or key.endswith("asset_pointers")):
+            continue
+        for nested in value if isinstance(value, list) else [value]:
+            if isinstance(nested, dict):
+                blocks.extend(_pointer_blocks(nested))
+    return blocks
+
+
+def _attachment_blocks(msg_data: dict, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Media blocks for uploaded files the message's content does not point at."""
+    metadata = msg_data.get("metadata")
+    attachments = metadata.get("attachments") if isinstance(metadata, dict) else None
+    pointed_at = {b["url"].split("://")[-1] for b in blocks if b.get("type") == "media"}
+    extra = []
+    for attachment in attachments if isinstance(attachments, list) else []:
+        file_id = attachment.get("id") if isinstance(attachment, dict) else None
+        if file_id and file_id not in pointed_at:
+            extra.append(media_block(
+                attachment.get("mime_type") or "application/octet-stream",
+                url=f"file-service://{file_id}",
+                filename=attachment.get("name"),
+            ))
+    return extra
+
+
+def _extract_content(msg_data: dict, skipped: Optional[Counter] = None) -> List[Dict[str, Any]]:
     """Extract content blocks from an OpenAI message."""
     content_obj = msg_data.get("content") or {}
     if not isinstance(content_obj, dict):
@@ -157,15 +235,29 @@ def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
         if text:
             blocks.append(text_block(text))
         return blocks
+    if content_type == "thoughts":
+        for thought in content_obj.get("thoughts") or []:
+            text = thought.get("content") if isinstance(thought, dict) else None
+            if text:
+                blocks.append(thinking_block(text))
+        return blocks
+    if content_type == "reasoning_recap":
+        recap = content_obj.get("content")
+        return [thinking_block(recap)] if isinstance(recap, str) and recap else []
+    if not parts and isinstance(content_obj.get("text"), str):
+        # code, execution_output and tether_quote carry their text here.
+        return [text_block(content_obj["text"])]
 
     for part in parts:
         if isinstance(part, str):
             blocks.append(text_block(part))
         elif isinstance(part, dict):
-            if "asset_pointer" in part or part.get("content_type") == "image_asset_pointer":
-                blocks.append(
-                    media_block("image/png", url=part.get("asset_pointer", ""))
-                )
+            pointers = _pointer_blocks(part)
+            if pointers:
+                blocks.extend(pointers)
+            elif part.get("content_type") == "audio_transcription":
+                if part.get("text"):
+                    blocks.append(text_block(part["text"]))
             elif part.get("type") == "tool_use":
                 blocks.append(
                     tool_use_block(
@@ -182,6 +274,6 @@ def _extract_content(msg_data: dict) -> List[Dict[str, Any]]:
                         is_error=part.get("is_error", False),
                     )
                 )
-            else:
-                blocks.append(text_block(str(part)))
-    return blocks
+            elif skipped is not None:
+                skipped[str(part.get("content_type") or part.get("type") or "<unknown>")] += 1
+    return blocks + _attachment_blocks(msg_data, blocks)

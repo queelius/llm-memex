@@ -2872,3 +2872,144 @@ class TestClaudeCodeHistoryImport:
         ]) + "\n")
         convs = hist_import(str(f))
         assert len(convs) == 1 and convs[0].message_count == 1
+
+
+def _gpt_node(node_id, parent, role, content, **metadata):
+    return {"id": node_id, "parent": parent, "children": [], "message": {
+        "id": node_id, "author": {"role": role}, "content": content,
+        "create_time": 1700000000, "metadata": metadata,
+    }}
+
+
+def _gpt_conv(conv_id, nodes, **fields):
+    mapping = {"root": {"id": "root", "parent": None, "children": [], "message": None}}
+    mapping.update({n["id"]: n for n in nodes})
+    return {"id": conv_id, "conversation_id": conv_id, "title": conv_id,
+            "create_time": 1700000000, "update_time": 1700000100,
+            "mapping": mapping, **fields}
+
+
+def _gpt_text(text):
+    return {"content_type": "text", "parts": [text]}
+
+
+def _sharded_export(directory, shards):
+    """A current ChatGPT export: shards, a manifest, and sidecar JSON."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for index, shard in enumerate(shards):
+        (directory / f"conversations-{index:03d}.json").write_text(json.dumps(shard))
+    (directory / "export_manifest.json").write_text(json.dumps({"version": 1}))
+    (directory / "shared_conversations.json").write_text(json.dumps(
+        [{"conversation_id": "c1", "id": "s1", "is_anonymous": True, "title": "t"}]))
+    return directory
+
+
+class TestOpenAISharedExportLayout:
+    def test_directory_with_shards_is_detected_and_read_whole(self, tmp_path):
+        from llm_memex.importers.openai import detect, import_path
+        export = _sharded_export(tmp_path / "x", [
+            [_gpt_conv("c1", [_gpt_node("m1", "root", "user", _gpt_text("one"))])],
+            [_gpt_conv("c2", [_gpt_node("m2", "root", "user", _gpt_text("two"))])],
+        ])
+        assert detect(str(export))
+        convs = import_path(str(export))
+        assert sorted(c.id for c in convs) == ["c1", "c2"]
+        assert convs[0].metadata["_provenance"]["source_format"] == "openai-export/2"
+
+    def test_single_file_export_keeps_its_layout_name(self, tmp_path):
+        from llm_memex.importers.openai import import_path
+        (tmp_path / "conversations.json").write_text(json.dumps(
+            [_gpt_conv("c1", [_gpt_node("m1", "root", "user", _gpt_text("one"))])]))
+        conv = import_path(str(tmp_path))[0]
+        assert conv.metadata["_provenance"]["source_format"] == "openai-export/1"
+
+    def test_gemini_does_not_claim_the_shared_conversations_sidecar(self, tmp_path):
+        from llm_memex.importers.gemini import detect
+        export = _sharded_export(tmp_path / "x", [[]])
+        assert not detect(str(export / "shared_conversations.json"))
+
+    def test_thoughts_and_recap_become_thinking(self, tmp_path):
+        from llm_memex.importers.openai import _extract_content
+        thoughts = {"content_type": "thoughts",
+                    "thoughts": [{"summary": "s", "content": "considering"}]}
+        assert _extract_content({"content": thoughts}) == [
+            {"type": "thinking", "text": "considering"}]
+        recap = {"content_type": "reasoning_recap", "content": "Thought for 22s"}
+        assert _extract_content({"content": recap}) == [
+            {"type": "thinking", "text": "Thought for 22s"}]
+
+    def test_text_field_content_is_read(self):
+        from llm_memex.importers.openai import _extract_content
+        code = {"content_type": "code", "language": "python", "text": "print(1)"}
+        assert _extract_content({"content": code}) == [{"type": "text", "text": "print(1)"}]
+
+    def test_voice_parts(self):
+        from llm_memex.importers.openai import _extract_content
+        parts = [
+            {"content_type": "audio_transcription", "text": "said this", "direction": "in"},
+            {"content_type": "audio_asset_pointer", "asset_pointer": "sediment://file_a",
+             "format": "wav"},
+            {"content_type": "real_time_user_audio_video_asset_pointer",
+             "audio_asset_pointer": {"content_type": "audio_asset_pointer",
+                                     "asset_pointer": "sediment://file_b", "format": "wav"},
+             "frames_asset_pointers": [{"content_type": "image_asset_pointer",
+                                        "asset_pointer": "sediment://file_c"}]},
+        ]
+        blocks = _extract_content({"content": {"content_type": "multimodal_text", "parts": parts}})
+        assert blocks[0] == {"type": "text", "text": "said this"}
+        assert [(b["media_type"], b["url"]) for b in blocks[1:]] == [
+            ("audio/wav", "sediment://file_a"),
+            ("audio/wav", "sediment://file_b"),
+            ("image/png", "sediment://file_c"),
+        ]
+
+    def test_unknown_part_is_counted_not_stringified(self):
+        from collections import Counter
+        from llm_memex.importers.openai import _extract_content
+        skipped = Counter()
+        content = {"content_type": "multimodal_text", "parts": ["hi", {"content_type": "new_thing"}]}
+        assert _extract_content({"content": content}, skipped) == [{"type": "text", "text": "hi"}]
+        assert skipped == {"new_thing": 1}
+
+    def test_attachments_become_media_once(self):
+        from llm_memex.importers.openai import _extract_content
+        blocks = _extract_content({
+            "content": {"content_type": "multimodal_text", "parts": [
+                {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_a"}]},
+            "metadata": {"attachments": [
+                {"id": "file_a", "name": "a.png", "mime_type": "image/png"},
+                {"id": "file_b", "name": "paper.pdf", "mime_type": "application/pdf"},
+            ]},
+        })
+        assert [(b["url"], b.get("filename")) for b in blocks] == [
+            ("sediment://file_a", None), ("file-service://file_b", "paper.pdf")]
+
+    def test_conversation_flags_and_default_model(self, tmp_path):
+        from llm_memex.importers.openai import _import_conversation
+        conv = _import_conversation(_gpt_conv(
+            "c", [_gpt_node("m", "root", "user", _gpt_text("x"))],
+            is_starred=True, is_archived=True, pinned_time=1700000050,
+            default_model_slug="gpt-x"))
+        assert conv.starred_at and conv.archived_at and conv.pinned_at
+        assert conv.model == "gpt-x"
+
+    def test_dat_assets_resolve_with_their_original_name(self, tmp_path):
+        from llm_memex.assets import copy_assets, resolve_openai_assets
+        from llm_memex.importers.openai import _import_conversation
+        export = tmp_path / "x"
+        export.mkdir()
+        (export / "file_a.dat").write_bytes(b"RIFFwav")
+        (export / "conversation_asset_file_names.json").write_text(
+            json.dumps({"file_a.dat": "take one.wav"}))
+        conv = _import_conversation(_gpt_conv("c", [_gpt_node("m", "root", "user", {
+            "content_type": "multimodal_text", "parts": [
+                {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_a"},
+                {"content_type": "image_asset_pointer", "asset_pointer": "sediment://../evil"},
+            ]})]))
+        assert resolve_openai_assets(conv, export) == 1
+        assert copy_assets(conv, tmp_path / "assets") == 1
+        good, bad = conv.messages["m"].content
+        assert good["media_type"] == "audio/wav"
+        assert good["url"] == "assets/take_one.wav"
+        assert (tmp_path / "assets" / "take_one.wav").read_bytes() == b"RIFFwav"
+        assert bad["url"] == "sediment://../evil"

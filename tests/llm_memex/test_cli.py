@@ -1598,3 +1598,108 @@ class TestCliConfigCache:
         finally:
             if hasattr(cli._load_cli_config, "_cache"):
                 del cli._load_cli_config._cache
+
+
+def _gpt_node(node_id, parent, role, text):
+    return {"id": node_id, "parent": parent, "children": [], "message": {
+        "id": node_id, "author": {"role": role},
+        "content": {"content_type": "text", "parts": [text]}, "create_time": 1700000000,
+    }}
+
+
+def _gpt_export(conv_id, nodes, update_time=1700000100):
+    mapping = {"root": {"id": "root", "parent": None, "children": [], "message": None}}
+    mapping.update({n["id"]: n for n in nodes})
+    return [{"id": conv_id, "title": conv_id, "create_time": 1700000000,
+             "update_time": update_time, "mapping": mapping}]
+
+
+def _run_import(*args):
+    return subprocess.run([sys.executable, "-m", "llm_memex", "import", *map(str, args)],
+                          capture_output=True, text=True)
+
+
+class TestOpenAIReimportKeepsHistory:
+    """The current ChatGPT export omits system and tool nodes and re-links the
+    tree around them. Importing it must not delete what an earlier export held."""
+
+    def _older_then_newer(self, tmp_path):
+        db_dir = tmp_path / "db"
+        older = tmp_path / "older.json"
+        older.write_text(json.dumps(_gpt_export("c", [
+            _gpt_node("u1", "root", "user", "question"),
+            _gpt_node("t1", "u1", "tool", "tool output"),
+            _gpt_node("a1", "t1", "assistant", "answer"),
+        ])))
+        assert _run_import(older, "--db", db_dir).returncode == 0
+        newer = tmp_path / "newer.json"
+        newer.write_text(json.dumps(_gpt_export("c", [
+            _gpt_node("u1", "root", "user", "question"),
+            _gpt_node("a1", "u1", "assistant", "answer"),  # re-linked past t1
+            _gpt_node("u2", "a1", "user", "follow up"),
+        ], update_time=1700000200)))
+        return db_dir, newer
+
+    def test_missing_messages_stay_and_tree_stays_whole(self, tmp_path):
+        from llm_memex.db import Database
+        db_dir, newer = self._older_then_newer(tmp_path)
+        assert _run_import(newer, "--db", db_dir).returncode == 0
+        with Database(str(db_dir)) as db:
+            conv = db.load_conversation("c")
+        assert set(conv.messages) == {"u1", "t1", "a1", "u2"}
+        assert conv.messages["a1"].parent_id == "t1"
+        assert conv.messages["u2"].parent_id == "a1"
+        assert [m.id for m in conv.get_all_paths()[0]] == ["u1", "t1", "a1", "u2"]
+        assert len(conv.get_all_paths()) == 1
+        assert conv.message_count == 4
+
+    def test_second_import_of_same_export_is_unchanged(self, tmp_path):
+        db_dir, newer = self._older_then_newer(tmp_path)
+        assert _run_import(newer, "--db", db_dir).returncode == 0
+        again = _run_import(newer, "--db", db_dir)
+        assert "1 unchanged" in again.stdout or "(1 unchanged)" in again.stdout
+
+    def test_notes_on_kept_messages_survive(self, tmp_path):
+        from llm_memex.db import Database
+        db_dir, newer = self._older_then_newer(tmp_path)
+        with Database(str(db_dir)) as db:
+            db.add_note(conversation_id="c", message_id="t1", text="on the tool output")
+        assert _run_import(newer, "--db", db_dir).returncode == 0
+        with Database(str(db_dir)) as db:
+            rows = db.execute_sql("SELECT message_id, conversation_id FROM notes")
+        assert rows == [{"message_id": "t1", "conversation_id": "c"}]
+
+
+class TestImportExportZip:
+    def test_zip_and_directory_import_the_same(self, tmp_path):
+        import zipfile
+        from llm_memex.db import Database
+        bundle = tmp_path / "chatgpt-export-data.zip"
+        with zipfile.ZipFile(bundle, "w") as z:
+            for index in range(2):
+                z.writestr(f"conversations-00{index}.json", json.dumps(_gpt_export(
+                    f"c{index}", [_gpt_node("m", "root", "user", "hi")])))
+            z.writestr("export_manifest.json", "{}")
+            z.writestr("shared_conversations.json", json.dumps(
+                [{"conversation_id": "c0", "id": "s", "title": "t", "is_anonymous": True}]))
+            z.writestr("file_a.dat", b"x")
+        db_dir = tmp_path / "db"
+        result = _run_import(bundle, "--db", db_dir)
+        assert result.returncode == 0, result.stderr
+        with Database(str(db_dir)) as db:
+            rows = db.execute_sql(
+                "SELECT c.id, c.source, p.source_file, p.source_format FROM conversations c "
+                "JOIN provenance p ON p.conversation_id = c.id ORDER BY c.id")
+        assert [r["id"] for r in rows] == ["c0", "c1"]
+        assert {r["source"] for r in rows} == {"openai"}
+        assert {r["source_file"] for r in rows} == {str(bundle)}
+        assert {r["source_format"] for r in rows} == {"openai-export/2"}
+
+    def test_zip_without_a_platform_export_is_refused(self, tmp_path):
+        import zipfile
+        bundle = tmp_path / "other.zip"
+        with zipfile.ZipFile(bundle, "w") as z:
+            z.writestr("README.md", "not an export")
+        result = _run_import(bundle, "--db", tmp_path / "db")
+        assert result.returncode == 1
+        assert "no importer found" in result.stderr

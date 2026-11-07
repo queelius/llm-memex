@@ -34,8 +34,10 @@ def detect(path: str) -> bool:
             # before falling back to the substring heuristic.
             if isinstance(first, dict) and ("mapping" in first or "chat_messages" in first):
                 return False
+            # A bare conversation_id is no signature: a ChatGPT export's
+            # shared_conversations.json is a list of records with one.
             if isinstance(first, dict) and any(
-                k in first for k in ("turns", "conversation_id", "parts")
+                k in first for k in ("turns", "messages", "parts")
             ):
                 return True
             sample = str(first).lower()

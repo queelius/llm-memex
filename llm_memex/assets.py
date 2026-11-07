@@ -5,8 +5,10 @@ import base64
 import binascii
 import hashlib
 import glob
+import json
 import logging
 import shutil
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -128,6 +130,34 @@ def _correct_media_type(block: dict, resolved_path: Path) -> None:
         block["media_type"] = inferred
 
 
+@lru_cache(maxsize=2)
+def _dat_asset_names(source_dir: Path) -> dict:
+    """``<id>.dat`` to original file name, for an export that records them."""
+    try:
+        names = json.loads((source_dir / "conversation_asset_file_names.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return names if isinstance(names, dict) else {}
+
+
+def _resolve_dat_asset(block: dict, url: str, source_dir: Path) -> bool:
+    """Point a media block at its ``<id>.dat`` file, if the export has one."""
+    scheme, separator, file_id = url.partition("://")
+    if not separator or scheme not in ("file-service", "sediment") or not file_id or "/" in file_id:
+        return False
+    path = source_dir / f"{file_id}.dat"
+    if not path.is_file():
+        return False
+    block["url"] = str(path.resolve())
+    name = _dat_asset_names(source_dir).get(path.name)
+    if isinstance(name, str) and name:
+        block["filename"] = name
+        _correct_media_type(block, Path(name))
+    else:
+        block.setdefault("filename", file_id)
+    return True
+
+
 def resolve_openai_assets(conv: Conversation, source_dir: Path) -> int:
     """Resolve OpenAI asset URLs to local file paths.
 
@@ -139,6 +169,9 @@ def resolve_openai_assets(conv: Conversation, source_dir: Path) -> int:
       ``image``, ``audio``, etc.
     - ``file-service://file-{ID}`` where the file now lives under the conv-id
       subdirectory (mixed exports).
+    - ``file-service://{ID}`` or ``sediment://{ID}`` in an export with
+      ``export_manifest.json``: a file ``{ID}.dat`` at the top of the source
+      dir, with its original name in ``conversation_asset_file_names.json``.
 
     For each located file, the block's URL is rewritten to the absolute path,
     and ``media_type`` is corrected from the actual file extension when the
@@ -152,6 +185,10 @@ def resolve_openai_assets(conv: Conversation, source_dir: Path) -> int:
             if block.get("type") != "media":
                 continue
             url = block.get("url", "")
+
+            if _resolve_dat_asset(block, url, source_dir):
+                count += 1
+                continue
 
             if url.startswith("sediment://"):
                 file_id = url.replace("sediment://", "")
