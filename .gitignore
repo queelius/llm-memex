@@ -119,3 +119,7 @@ test.db/
 # or README assets should live under ``docs/`` or ``images/`` instead.
 /*.png
 /*.html
+
+# Local tool state
+uv.lock
+.superpowers/
