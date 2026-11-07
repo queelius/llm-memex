@@ -18,7 +18,6 @@ from llm_memex.exporters._longecho_docs import (
     clear_destination,
     inspect_destination,
     listed_paths,
-    prepare_destination,
     render_placeholder_readme,
     render_root_readme,
     render_site_readme,
@@ -226,6 +225,11 @@ def test_site_readme_without_data_does_not_claim_a_copy():
 
 
 # --------------------------------------------------------- prepare_destination
+
+def prepare_destination(out_dir):
+    """Inspect, then clear: the exporter's two steps without its other checks."""
+    clear_destination(out_dir, inspect_destination(out_dir))
+
 
 def _stamped_export(out_dir, files, *, sums=True, generator=None):
     """Lay out a previous export: *files* maps relative paths to text."""

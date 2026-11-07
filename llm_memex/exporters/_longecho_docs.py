@@ -636,11 +636,3 @@ def clear_destination(out_dir: Path, listed: Iterable[PurePosixPath]) -> None:
     finally:
         os.close(root_fd)
 
-
-def prepare_destination(out_dir: Path) -> None:
-    """Make *out_dir* ready for a fresh export, or refuse: inspect, then clear.
-
-    The exporter calls the two steps itself, with its own checks and the
-    snapshot in between, so every refusal comes before anything is deleted.
-    """
-    clear_destination(out_dir, inspect_destination(out_dir))

@@ -9,7 +9,6 @@ from llm_memex.exporters._snapshot import (
     check_destination,
     copy_retained_assets,
     gzip_file,
-    strip_fts5_and_vacuum,
     take_snapshot,
 )
 from llm_memex.exporters.html_template import get_template
@@ -18,11 +17,6 @@ from llm_memex.models import Conversation
 
 _VENDORED_DIR = Path(__file__).parent / "vendored"
 _SQL_JS_FILES = ("sql-wasm.js", "sql-wasm.wasm")
-
-# Aliases kept for callers and tests that reach into this module.
-_strip_fts5_and_vacuum = strip_fts5_and_vacuum
-_gzip_file = gzip_file
-_copy_retained_assets = copy_retained_assets
 
 
 def export(conversations: List[Conversation], path: str, **kwargs) -> None:
