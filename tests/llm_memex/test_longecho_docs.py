@@ -18,7 +18,6 @@ from llm_memex.exporters._longecho_docs import (
     clear_destination,
     inspect_destination,
     listed_paths,
-    render_placeholder_readme,
     render_root_readme,
     render_site_readme,
     summarize,
@@ -610,13 +609,3 @@ def test_sha256sums_skips_unusable_written_entries(tmp_path):
         "data/x.txt"]
 
 
-def test_placeholder_readme_is_stamped_and_recognised_as_interrupted(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "README.md").write_text(render_placeholder_readme())
-    front, body = _split(render_placeholder_readme())
-    assert front["generator"].startswith(GENERATOR_PREFIX)
-    assert "in progress" in body
-    assert "did not finish" in body and "run the export again" in body.lower()
-    with pytest.raises(ValueError, match="interrupted"):
-        prepare_destination(out)

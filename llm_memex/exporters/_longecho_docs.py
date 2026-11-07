@@ -21,6 +21,23 @@ GENERATOR_PREFIX = "llm-memex longecho"
 SUMS_NAME = "SHA256SUMS"
 README_NAME = "README.md"
 _SUMS_TMP_NAME = f".{SUMS_NAME}.tmp"
+# An export is built in a folder with this prefix inside the destination and
+# moved into place when complete; only a killed run leaves one behind.
+STAGING_PREFIX = ".llm-memex-staging-"
+# Written into a staging folder as soon as it is made: a folder is treated as
+# a killed run's leftover only if it carries this marker (or is empty), never
+# for its name alone.
+STAGING_MARKER = ".llm-memex-staging"
+
+
+def is_staging_leftover(entry: Path) -> bool:
+    """True if *entry* is a staging folder an export made (and may remove)."""
+    if not entry.name.startswith(STAGING_PREFIX) or entry.is_symlink() or not entry.is_dir():
+        return False
+    marker = entry / STAGING_MARKER
+    if marker.is_file() and not marker.is_symlink():
+        return True
+    return not any(entry.iterdir())
 
 _HASH_CHUNK = 1024 * 1024  # 1 MB reads, so a multi-GB database never loads at once
 _SHA256_HEX_LEN = 64
@@ -315,27 +332,6 @@ def render_site_readme(*, site_has_data: bool) -> str:
     return _frontmatter(meta) + "\n" + body
 
 
-def render_placeholder_readme() -> str:
-    """A stand-in root README, written while an export is under way.
-
-    It carries the ownership stamp, so an export that stops before the real
-    README replaces it leaves a folder the next run recognises as ours instead
-    of one it refuses as foreign. A run that fails lists what it wrote in
-    ``SHA256SUMS`` on the way out, so running the export again replaces it.
-    """
-    meta = {
-        "name": "llm-memex archive (export in progress)",
-        "description": "An export is in progress, or it did not finish.",
-        "generator": _generator(),
-    }
-    return (
-        _frontmatter(meta)
-        + "\nAn llm-memex export into this folder is in progress, or it did not "
-        "finish. Run the export again to replace what is here; files you added "
-        "yourself are kept.\n"
-    )
-
-
 # ---------------------------------------------------------------------------
 # SHA256SUMS
 # ---------------------------------------------------------------------------
@@ -547,21 +543,6 @@ def _remove_empty_directory(root_fd: int, rel: PurePosixPath) -> None:
         os.close(parent_fd)
 
 
-def remove_empty_directories(out_dir: Path, dirs: Iterable[PurePosixPath]) -> None:
-    """rmdir each of *dirs* below *out_dir* that is empty, deepest first.
-
-    Through directory handles like every other deletion here; a directory
-    that holds anything, or is a symlink, is left alone.
-    """
-    root_fd = os.open(out_dir, _DIR_FLAGS)
-    try:
-        for rel in sorted(set(dirs), key=lambda p: len(p.parts), reverse=True):
-            if rel.parts:
-                _remove_empty_directory(root_fd, rel)
-    finally:
-        os.close(root_fd)
-
-
 def inspect_destination(out_dir: Path) -> Set[PurePosixPath]:
     """Decide whether *out_dir* may receive a fresh export; touch nothing.
 
@@ -575,8 +556,8 @@ def inspect_destination(out_dir: Path) -> Set[PurePosixPath]:
     out_dir = Path(out_dir)
     if out_dir.exists() and not out_dir.is_dir():
         raise ValueError(f"{out_dir} exists and is not a directory")
-    if not out_dir.exists() or not any(out_dir.iterdir()):
-        return set()
+    if not out_dir.exists() or all(is_staging_leftover(e) for e in out_dir.iterdir()):
+        return set()  # missing, empty, or only a killed run's staging folder
 
     found = _readme_generator(out_dir / README_NAME)
     if found is None or not found.startswith(GENERATOR_PREFIX):

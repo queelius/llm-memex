@@ -22,12 +22,13 @@ from llm_memex.db import Database
 from llm_memex.exporters import arkiv_export
 from llm_memex.exporters._longecho_docs import (
     README_NAME,
+    STAGING_MARKER,
+    STAGING_PREFIX,
     SUMS_NAME,
     ArchiveSummary,
     clear_destination,
     inspect_destination,
-    remove_empty_directories,
-    render_placeholder_readme,
+    is_staging_leftover,
     render_root_readme,
     render_site_readme,
     summarize,
@@ -63,9 +64,8 @@ _SNAPSHOT_NAME = "conversations.db"
 # Entries of the destination that every export writes into. A symlink in any
 # of them would send a write somewhere else.
 _TOP_LEVEL = (README_NAME, SUMS_NAME, "data", "text", "site")
-# Directories a fresh export writes with no regard for what is there
-# (write_directory overwrites, copy_retained_assets removes first). A previous
-# export's copies are gone by now, so anything present is not ours to lose.
+# Directories an export owns whole: anything in them the previous export did
+# not list is refused, since the new copies replace them wholesale.
 _WRITTEN_BLINDLY = ("data/arkiv", "data/assets")
 
 
@@ -103,166 +103,162 @@ def export(conversations: Any, path: str, **kwargs) -> int:
 
     out = Path(path)
     check_destination(db_path, out)
-    # Every refusal is decided here, before anything is deleted, so a refused
-    # run leaves the previous export exactly as it was.
+    # Every refusal is decided here, before anything is written or deleted,
+    # so a refused run leaves the previous export exactly as it was.
     listed = inspect_destination(out)
     _refuse_foreign_content(out, listed)
     _refuse_symlinks(out)
 
-    run = _Run(out)
+    created = not out.exists()
+    out.mkdir(parents=True, exist_ok=True)
+    _remove_stale_staging(out)
+    # Built inside the destination, so every move into place is a rename on
+    # one filesystem; the previous export is untouched until the build is
+    # complete, and a failed build costs nothing but the staging folder.
+    staging = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=out))
     try:
-        # The temporary directory is removed before the handler below runs,
-        # which frees its space when a full disk was the failure.
-        with tempfile.TemporaryDirectory(prefix="llm-memex-longecho-") as tmp:
-            tmp_dir = Path(tmp)
-            snapshot = tmp_dir / _SNAPSHOT_NAME
-            # First, while the destination is untouched: a full disk (the
-            # likeliest failure, the snapshot being the biggest write) then
-            # leaves the previous export intact.
-            take_snapshot(
-                db_path, snapshot, include_notes=include_notes,
-                include_archived=include_archived,
-            )
-            clear_destination(out, listed)
-            run.cleared = True
-            # Stamped stand-in until the real README replaces it.
-            run.will_write(README_NAME).write_text(
-                render_placeholder_readme(), encoding="utf-8"
-            )
-            _refuse_leftovers(out)
-            run.blind_dirs_ours = True
-
-            entries: List[IndexEntry] = []
-            with Database(str(tmp_dir), readonly=True) as snap_db:
-                schema_ddl = snap_db.get_schema()
-                ids = [
-                    row["id"]
-                    for row in snap_db.conn.execute(
-                        "SELECT id FROM conversations ORDER BY created_at, id"
-                    )
-                ]
-                (out / "data").mkdir(exist_ok=True)
-                count = arkiv_export.write_directory(
-                    _text_writing_stream(snap_db, ids, run, entries, include_notes),
-                    out / "data" / "arkiv",
-                    include_notes=include_notes,
-                    db=snap_db if include_notes else None,
-                )
-
-            # Opening the snapshot through Database switched it to WAL.
-            with contextlib.closing(sqlite3.connect(str(snapshot))) as conn:
-                conn.execute("PRAGMA journal_mode=DELETE")
-            shutil.copyfile(snapshot, run.will_write("data", _SNAPSHOT_NAME))
-            copy_retained_assets(snapshot, db_path.parent / "assets", out / "data" / "assets")
-
-            (out / "text").mkdir(exist_ok=True)
-            run.will_write("text", "index.md").write_text(
-                render_index(entries), encoding="utf-8"
-            )
-
-            chunks = _write_site(
-                run, snapshot, tmp_dir, schema_ddl,
-                site_max_db_bytes=site_max_db_bytes, db_chunk_bytes=db_chunk_bytes,
-            )
-            facts = summarize(snapshot)
-
-        summary = ArchiveSummary(
-            owner=owner,
-            include_notes=include_notes,
-            include_archived=include_archived,
-            site_has_data=chunks > 0,
-            exported_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            **facts,
+        (staging / STAGING_MARKER).write_text("llm-memex longecho staging\n", encoding="utf-8")
+        count = _build(
+            staging, db_path,
+            include_notes=include_notes, include_archived=include_archived,
+            owner=owner, site_max_db_bytes=site_max_db_bytes,
+            db_chunk_bytes=db_chunk_bytes,
         )
-        run.will_write(README_NAME).write_text(
-            render_root_readme(summary), encoding="utf-8"
-        )
-        # Last: it lists what this run wrote, and only that.
-        write_sha256sums(out, run.finished_files())
+        files = _export_files(staging)
+        _refuse_collisions(out, files, listed)
+        _swap(out, staging, files, listed)
     except BaseException:
-        run.record_failure()
+        shutil.rmtree(staging, ignore_errors=True)
+        if created:
+            with contextlib.suppress(OSError):
+                out.rmdir()  # only if the failed run left it empty
         raise
+    shutil.rmtree(staging, ignore_errors=True)
     return count
 
 
-class _Run:
-    """What one export has written into the destination so far.
+def _build(
+    dest: Path,
+    db_path: Path,
+    *,
+    include_notes: bool,
+    include_archived: bool,
+    owner: Any,
+    site_max_db_bytes: int,
+    db_chunk_bytes: int,
+) -> int:
+    """Write a complete export into the empty directory *dest*; return its count."""
+    # The temporary directory is removed before an error propagates, which
+    # frees its space when a full disk was the failure.
+    with tempfile.TemporaryDirectory(prefix="llm-memex-longecho-") as tmp:
+        tmp_dir = Path(tmp)
+        snapshot = tmp_dir / _SNAPSHOT_NAME
+        take_snapshot(
+            db_path, snapshot, include_notes=include_notes,
+            include_archived=include_archived,
+        )
+        entries: List[IndexEntry] = []
+        with Database(str(tmp_dir), readonly=True) as snap_db:
+            schema_ddl = snap_db.get_schema()
+            ids = [
+                row["id"]
+                for row in snap_db.conn.execute(
+                    "SELECT id FROM conversations ORDER BY created_at, id"
+                )
+            ]
+            (dest / "data").mkdir()
+            count = arkiv_export.write_directory(
+                _text_writing_stream(snap_db, ids, dest, entries, include_notes),
+                dest / "data" / "arkiv",
+                include_notes=include_notes,
+                db=snap_db if include_notes else None,
+            )
 
-    A path is recorded before its file is written, so a file a failure cut
-    short is still accounted for (``write_sha256sums`` skips paths that do not
-    exist). After the destination was cleared, a failed run lists what it
-    wrote in ``SHA256SUMS`` before the error propagates: the folder then holds
-    the stamped stand-in README plus a listing, and the next run replaces it
-    the way it replaces a finished export.
+        # Opening the snapshot through Database switched it to WAL.
+        with contextlib.closing(sqlite3.connect(str(snapshot))) as conn:
+            conn.execute("PRAGMA journal_mode=DELETE")
+        shutil.copyfile(snapshot, dest / "data" / _SNAPSHOT_NAME)
+        copy_retained_assets(snapshot, db_path.parent / "assets", dest / "data" / "assets")
+
+        (dest / "text").mkdir(exist_ok=True)
+        (dest / "text" / "index.md").write_text(render_index(entries), encoding="utf-8")
+
+        chunks = _write_site(
+            dest, snapshot, tmp_dir, schema_ddl,
+            site_max_db_bytes=site_max_db_bytes, db_chunk_bytes=db_chunk_bytes,
+        )
+        facts = summarize(snapshot)
+
+    summary = ArchiveSummary(
+        owner=owner,
+        include_notes=include_notes,
+        include_archived=include_archived,
+        site_has_data=chunks > 0,
+        exported_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **facts,
+    )
+    (dest / README_NAME).write_text(render_root_readme(summary), encoding="utf-8")
+    # Everything in dest is this run's, so the listing is the whole tree.
+    write_sha256sums(dest, _export_files(dest))
+    return count
+
+
+def _swap(
+    out: Path, staging: Path, files: List[PurePosixPath], listed: Set[PurePosixPath]
+) -> None:
+    """Replace the previous export in *out* with the finished one in *staging*.
+
+    Only renames happen here, so the folder is in a mixed state for
+    moments, not for the length of an export. The previous export's
+    stamped README stays until the new one replaces it in one rename (the
+    first move), and ``SHA256SUMS`` arrives last. If a move fails, what was
+    moved is listed in ``SHA256SUMS`` before the error propagates, so the
+    next run replaces it; only a hard kill in this window leaves the stamped
+    README without a listing, which the next run reports as interrupted.
     """
-
-    def __init__(self, out: Path) -> None:
-        self.out = out
-        self.written: List[PurePosixPath] = []
-        self.cleared = False  # the previous export's files are gone
-        # data/arkiv and data/assets were proved absent after clearing, so
-        # every file in them is this run's.
-        self.blind_dirs_ours = False
-
-    def will_write(self, *parts: str) -> Path:
-        """Record ``out/<parts>`` as written by this run; return its full path."""
-        rel = PurePosixPath(*parts)
-        self.written.append(rel)
-        return self.out.joinpath(*rel.parts)
-
-    def record(self, paths: List[Path]) -> None:
-        """Record files a helper already wrote below ``out``."""
-        self.written += [PurePosixPath(p.relative_to(self.out).as_posix()) for p in paths]
-
-    def finished_files(self) -> List[PurePosixPath]:
-        """Everything this run wrote, including the two blindly written trees."""
-        files = list(self.written)
-        if self.blind_dirs_ours:
-            for name in _WRITTEN_BLINDLY:
-                files += _files_under(self.out, name)
-        return files
-
-    def record_failure(self) -> None:
-        """List what this run wrote, so the next run can replace it.
-
-        Nothing to do before clearing: the previous export is still whole. If
-        writing the listing fails too (the disk is still full), the stamped
-        README without ``SHA256SUMS`` is reported as interrupted next time;
-        the original error is the one that propagates.
-        """
-        if not self.cleared:
-            return
-        if self.blind_dirs_ours:
-            # Empty directories this run made there would be refused as foreign.
-            dirs = [PurePosixPath(name) for name in _WRITTEN_BLINDLY]
-            for name in _WRITTEN_BLINDLY:
-                dirs += _dirs_under(self.out, name)
-            with contextlib.suppress(OSError):
-                remove_empty_directories(self.out, dirs)
-        try:
-            write_sha256sums(self.out, self.finished_files())
-        except Exception:
-            pass
+    readme, sums = PurePosixPath(README_NAME), PurePosixPath(SUMS_NAME)
+    clear_destination(out, set(listed) - {readme})
+    moved: List[PurePosixPath] = []
+    try:
+        for rel in [readme] + [f for f in files if f not in (readme, sums)]:
+            target = out.joinpath(*rel.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Recorded first, so an interrupt just after the rename cannot
+            # leave a moved file out of the recovery listing (missing paths
+            # are skipped when it is written).
+            moved.append(rel)
+            os.replace(staging.joinpath(*rel.parts), target)
+        os.replace(staging / SUMS_NAME, out / SUMS_NAME)
+    except BaseException:
+        # Only beside a stamped README (old or new, ours either way): a first
+        # export that failed before its README arrived lists nothing, so the
+        # caller can remove the folder it created.
+        if (out / README_NAME).is_file():
+            with contextlib.suppress(Exception):
+                write_sha256sums(out, [readme, *moved])
+        raise
 
 
-def _dirs_under(out: Path, rel: str) -> List[PurePosixPath]:
-    """Every directory below ``out/rel``, as paths relative to ``out``."""
+def _remove_stale_staging(out: Path) -> None:
+    """Remove staging folders a killed run left (marked as such, or empty)."""
+    for entry in out.iterdir():
+        if is_staging_leftover(entry):
+            shutil.rmtree(entry)
+
+
+def _files_under(root: Path, rel: str = ".") -> List[PurePosixPath]:
+    """Every regular file below ``root/rel``, as sorted paths relative to *root*."""
     found = []
-    for dirpath, dirnames, _filenames in os.walk(out / rel, followlinks=False):
-        for name in dirnames:
-            full = Path(dirpath) / name
-            found.append(PurePosixPath(full.relative_to(out).as_posix()))
-    return found
-
-
-def _files_under(out: Path, rel: str) -> List[PurePosixPath]:
-    """Every regular file below ``out/rel``, as paths relative to ``out``."""
-    found = []
-    for dirpath, _dirnames, filenames in os.walk(out / rel, followlinks=False):
+    for dirpath, _dirnames, filenames in os.walk(root / rel, followlinks=False):
         for name in filenames:
             full = Path(dirpath) / name
-            found.append(PurePosixPath(full.relative_to(out).as_posix()))
+            found.append(PurePosixPath(full.relative_to(root).as_posix()))
     return sorted(found)
+
+
+def _export_files(staging: Path) -> List[PurePosixPath]:
+    """The export's files in *staging*: all of them but the staging marker."""
+    return [f for f in _files_under(staging) if f != PurePosixPath(STAGING_MARKER)]
 
 
 def _leftover_message(path: Path) -> str:
@@ -272,6 +268,26 @@ def _leftover_message(path: Path) -> str:
     )
 
 
+def _refuse_collisions(
+    out: Path, files: List[PurePosixPath], listed: Set[PurePosixPath]
+) -> None:
+    """Refuse, before anything is deleted, to move a new file onto one a person made.
+
+    A path the new export writes may already exist in *out* only as a file
+    the previous export listed (or as its README and listing); and no
+    directory it needs may be a file there.
+    """
+    ours = set(listed) | {PurePosixPath(README_NAME), PurePosixPath(SUMS_NAME)}
+    for rel in files:
+        for parent in list(rel.parents)[:-1]:
+            full = out.joinpath(*parent.parts)
+            if full.is_symlink() or (full.exists() and not full.is_dir()):
+                raise ValueError(_leftover_message(full))
+        target = out.joinpath(*rel.parts)
+        if (target.is_symlink() or target.exists()) and rel not in ours:
+            raise ValueError(_leftover_message(target))
+
+
 def _refuse_foreign_content(out: Path, listed: Set[PurePosixPath]) -> None:
     """Before anything is deleted: refuse if data/arkiv or data/assets hold
     anything but regular files the previous export's SHA256SUMS lists (*listed*,
@@ -279,8 +295,7 @@ def _refuse_foreign_content(out: Path, listed: Set[PurePosixPath]) -> None:
 
     A fresh export rewrites those two directories wholesale, so hand-added
     content in them would be lost; and once the listed files are deleted the
-    two directories must be gone, or ``_refuse_leftovers`` would stop the run
-    after the previous export was already cleared.
+    two directories must be gone before the new ones move in.
     """
     listed_dirs = {parent for rel in listed for parent in rel.parents}
     for name in _WRITTEN_BLINDLY:
@@ -329,17 +344,10 @@ def _refuse_symlinks(out: Path) -> None:
                     )
 
 
-def _refuse_leftovers(out: Path) -> None:
-    """Backstop for ``_refuse_foreign_content``: nothing may remain where we write blindly."""
-    for name in _WRITTEN_BLINDLY:
-        if (out / name).is_symlink() or (out / name).exists():
-            raise ValueError(_leftover_message(out / name))
-
-
 def _text_writing_stream(
     snap_db: Database,
     ids: List[str],
-    run: _Run,
+    dest: Path,
     entries: List[IndexEntry],
     include_notes: bool,
 ) -> Iterator[Any]:
@@ -354,7 +362,7 @@ def _text_writing_stream(
             continue
         notes = snap_db.get_notes(conversation_id=conv.id) if include_notes else []
         rel = text_path(conv)
-        target = run.will_write("text", *rel.parts)
+        target = dest.joinpath("text", *rel.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_conversation(conv, notes), encoding="utf-8")
         entries.append(IndexEntry(rel, conv.title or "", conv.created_at, conv.source))
@@ -362,7 +370,7 @@ def _text_writing_stream(
 
 
 def _write_site(
-    run: _Run,
+    dest: Path,
     snapshot: Path,
     tmp_dir: Path,
     schema_ddl: str,
@@ -370,18 +378,16 @@ def _write_site(
     site_max_db_bytes: int,
     db_chunk_bytes: int,
 ) -> int:
-    """Write the viewer into ``site/``, recording every file in *run*; return
-    the number of database chunks (0 = left out, too large)."""
-    site_dir = run.out / "site"
+    """Write the viewer into ``dest/site``; return the number of database
+    chunks (0 = left out, too large)."""
+    site_dir = dest / "site"
     site_dir.mkdir(exist_ok=True)
     chunks = 0
     if snapshot.stat().st_size <= site_max_db_bytes:
         db_gz = tmp_dir / f"{_SNAPSHOT_NAME}.gz"
         gzip_file(snapshot, db_gz, keep_source=True)
-        chunk_files = write_db_chunks(db_gz, site_dir, db_chunk_bytes)
-        run.record(chunk_files)
-        chunks = len(chunk_files)
-    run.will_write("site", "index.html").write_text(
+        chunks = len(write_db_chunks(db_gz, site_dir, db_chunk_bytes))
+    (site_dir / "index.html").write_text(
         get_template(
             schema_ddl,
             media_base="../data/assets/",
@@ -390,7 +396,9 @@ def _write_site(
         ),
         encoding="utf-8",
     )
-    run.record(copy_sql_js(site_dir))
-    run.record(write_wasm_script(site_dir))
-    run.will_write("site", README_NAME).write_text(render_site_readme(site_has_data=chunks > 0), encoding="utf-8")
+    copy_sql_js(site_dir)
+    write_wasm_script(site_dir)
+    (site_dir / README_NAME).write_text(
+        render_site_readme(site_has_data=chunks > 0), encoding="utf-8"
+    )
     return chunks

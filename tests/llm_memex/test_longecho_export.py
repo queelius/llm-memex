@@ -551,18 +551,25 @@ def test_snapshot_failure_keeps_previous_export(source, tmp_path, monkeypatch):
     _assert_clean_export(out)
 
 
-# Steps that fail after the destination was cleared: before data/assets is
-# written (data/arkiv already is), inside site/, and at the very end.
-_LATE_STEPS = ["copy_retained_assets", "write_wasm_script", "render_root_readme"]
+# Steps of the build: before data/assets is written (data/arkiv already is),
+# inside site/, and at the very end.
+_BUILD_STEPS = ["copy_retained_assets", "write_wasm_script", "render_root_readme"]
+
+
+def _staging_dirs(out):
+    return [p for p in out.iterdir() if p.name.startswith(".llm-memex-staging-")]
 
 
 @pytest.mark.parametrize("error", [OSError(28, "No space left on device"),
                                    KeyboardInterrupt()], ids=["oserror", "interrupt"])
-@pytest.mark.parametrize("step", _LATE_STEPS)
-def test_failed_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch, step, error):
+@pytest.mark.parametrize("step", _BUILD_STEPS)
+def test_failed_build_keeps_previous_export(source, tmp_path, monkeypatch, step, error):
+    """The new export is built aside: a failure anywhere in it leaves the
+    previous export byte for byte, with no staging debris."""
     out = tmp_path / "out"
     _export(source, out)
     _hand_added(out)
+    before = _tree(out)
 
     def boom(*args, **kwargs):
         raise error
@@ -570,44 +577,17 @@ def test_failed_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch
     monkeypatch.setattr(longecho, step, boom)
     with pytest.raises(type(error)):
         _export(source, out)
-    readme = (out / "README.md").read_text()
-    assert "generator: llm-memex longecho" in readme
-    assert "did not finish" in readme and "again" in readme
-    # what the failed run left is listed, so the next run can remove it
+    assert _tree(out) == before
     assert _sha256_ok(out).returncode == 0
-    assert not {"my-letter.md", "text/mine.md", "data/extra.txt"} & set(_sums_listing(out))
-    _assert_hand_added_kept(out)
 
     monkeypatch.undo()
     assert _export(source, out) == 2
     _assert_hand_added_kept(out)
     _assert_clean_export(out)
-    assert "did not finish" not in (out / "README.md").read_text()
 
 
-def test_failure_leaving_an_empty_directory_is_replaced_by_the_next_run(
-        source, tmp_path, monkeypatch):
-    """Re-review probe: a run that failed after creating an empty directory
-    under data/assets left debris every later run refused as foreign."""
-    out = tmp_path / "out"
-    _export(source, out)
-    _hand_added(out)
-
-    def boom(db, src, dest, *args, **kwargs):
-        (Path(dest) / "sub" / "deeper").mkdir(parents=True)
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(longecho, "copy_retained_assets", boom)
-    with pytest.raises(OSError):
-        _export(source, out)
-    monkeypatch.undo()
-    assert _export(source, out) == 2
-    _assert_hand_added_kept(out)
-    _assert_clean_export(out)
-
-
-def test_failed_first_export_is_replaced_by_the_next_run(source, tmp_path, monkeypatch):
-    out = tmp_path / "out"
+def test_failed_first_export_leaves_nothing(source, tmp_path, monkeypatch):
+    out = tmp_path / "new" / "out"
 
     def boom(*args, **kwargs):
         raise OSError(28, "No space left on device")
@@ -615,6 +595,7 @@ def test_failed_first_export_is_replaced_by_the_next_run(source, tmp_path, monke
     monkeypatch.setattr(longecho, "write_wasm_script", boom)
     with pytest.raises(OSError):
         _export(source, out)
+    assert not out.exists()
     monkeypatch.undo()
     assert _export(source, out) == 2
     assert _sha256_ok(out).returncode == 0
@@ -622,21 +603,57 @@ def test_failed_first_export_is_replaced_by_the_next_run(source, tmp_path, monke
     assert {p.relative_to(out).as_posix() for p in _all_files(out)} - listed == {"SHA256SUMS"}
 
 
-def test_killed_export_is_reported_as_interrupted(source, tmp_path, monkeypatch):
-    """A run that dies without recording what it wrote (here: the recovery
-    write fails too, as after a hard kill) is refused with advice that keeps
-    hand-added files; the original error is the one raised."""
+def _fail_after_moves(monkeypatch, n):
+    """Make the swap's os.replace fail after *n* successful moves."""
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        # Moves out of staging only (writing SHA256SUMS renames within it).
+        if ".llm-memex-staging-" in str(src) and ".llm-memex-staging-" not in str(dst):
+            calls["n"] += 1
+            if calls["n"] > n:
+                raise OSError(5, "Input/output error")
+        return real(src, dst)
+
+    monkeypatch.setattr(longecho.os, "replace", flaky)
+
+
+@pytest.mark.parametrize("n", [0, 3])
+def test_failed_swap_is_replaced_by_the_next_run(source, tmp_path, monkeypatch, n):
     out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+    _fail_after_moves(monkeypatch, n)
+    with pytest.raises(OSError, match="Input/output"):
+        _export(source, out)
+    monkeypatch.undo()
+    # stamped, and what the run moved in is listed, so the next run replaces it
+    assert "generator: llm-memex longecho" in (out / "README.md").read_text()
+    assert _sha256_ok(out).returncode == 0
+    assert not _staging_dirs(out)
+    _assert_hand_added_kept(out)
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("disk full")
 
-    def sums_fail(*args, **kwargs):
-        raise OSError(28, "No space left on device")
+def test_killed_swap_is_reported_as_interrupted(source, tmp_path, monkeypatch):
+    """A hard kill mid-swap (here: the recovery listing fails too) leaves the
+    stamped README without SHA256SUMS, which is refused with advice that
+    keeps hand-added files; the original error is the one raised."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _fail_after_moves(monkeypatch, 3)
+    real_sums = longecho.write_sha256sums
 
-    monkeypatch.setattr(longecho, "copy_retained_assets", boom)
+    def sums_fail(dest, files):
+        if Path(dest) == out:
+            raise OSError(28, "No space left on device")
+        return real_sums(dest, files)
+
     monkeypatch.setattr(longecho, "write_sha256sums", sums_fail)
-    with pytest.raises(RuntimeError, match="disk full"):
+    with pytest.raises(OSError, match="Input/output"):
         _export(source, out)
     assert "generator: llm-memex longecho" in (out / "README.md").read_text()
     assert not (out / "SHA256SUMS").exists()
@@ -644,6 +661,89 @@ def test_killed_export_is_reported_as_interrupted(source, tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="interrupted") as err:
         _export(source, out)
     assert "Move out any files you added yourself" in str(err.value)
+
+
+@pytest.mark.parametrize("first", [True, False], ids=["first-export", "re-export"])
+def test_killed_build_leftovers_are_removed(source, tmp_path, first):
+    """A staging folder a killed run left is the exporter's own: the next run
+    removes it, and it does not make a fresh destination look foreign."""
+    out = tmp_path / "out"
+    if not first:
+        _export(source, out)
+    stale = out / ".llm-memex-staging-dead"
+    (stale / "data").mkdir(parents=True)
+    (stale / "data" / "half.db").write_bytes(b"partial")
+    (stale / ".llm-memex-staging").write_text("marker")
+    (out / ".llm-memex-staging-empty").mkdir()
+    assert _export(source, out) == 2
+    assert not _staging_dirs(out)
+    listed = set(_sums_listing(out))
+    assert {p.relative_to(out).as_posix() for p in _all_files(out)} - listed == {"SHA256SUMS"}
+
+
+def test_unmarked_folder_with_staging_name_is_never_removed(source, tmp_path):
+    """Review probe: cleanup used to delete any folder named like staging."""
+    out = tmp_path / "out"
+    _export(source, out)
+    mine = out / ".llm-memex-staging-my-backup"
+    mine.mkdir()
+    (mine / "keep.txt").write_text("mine")
+    assert _export(source, out) == 2
+    assert (mine / "keep.txt").read_text() == "mine"
+    fresh = tmp_path / "fresh"
+    (fresh / ".llm-memex-staging-my-backup").mkdir(parents=True)
+    (fresh / ".llm-memex-staging-my-backup" / "keep.txt").write_text("mine")
+    with pytest.raises(ValueError, match="not written by"):
+        _export(source, fresh)
+
+
+def test_first_export_failing_on_first_move_leaves_nothing(source, tmp_path, monkeypatch):
+    """Review probe: an empty SHA256SUMS used to remain, refused for good."""
+    out = tmp_path / "out"
+    _fail_after_moves(monkeypatch, 0)
+    with pytest.raises(OSError, match="Input/output"):
+        _export(source, out)
+    monkeypatch.undo()
+    assert not out.exists()
+    assert _export(source, out) == 2
+
+
+def test_interrupt_just_after_a_move_keeps_it_listed(source, tmp_path, monkeypatch):
+    """Review probe: a file renamed in but not yet recorded was left out of the
+    listing, and under data/arkiv blocked every later run."""
+    out = tmp_path / "out"
+    _export(source, out)
+    _hand_added(out)
+    real = os.replace
+
+    def interrupted(src, dst):
+        real(src, dst)
+        if ".llm-memex-staging-" in str(src) and "/data/arkiv/" in str(dst):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(longecho.os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _export(source, out)
+    monkeypatch.undo()
+    assert any(p.startswith("data/arkiv/") for p in _sums_listing(out))
+    assert _export(source, out) == 2
+    _assert_hand_added_kept(out)
+    _assert_clean_export(out)
+
+
+def test_new_file_landing_on_a_hand_made_one_is_refused_before_touching(source, tmp_path):
+    """The previous export used to overwrite an unlisted file at a path it
+    writes; now that is refused while everything is still in place."""
+    out = tmp_path / "out"
+    _export(source, out)
+    lines = (out / "SHA256SUMS").read_text().splitlines()
+    (out / "SHA256SUMS").write_text(
+        "".join(l + "\n" for l in lines if not l.endswith("  text/index.md")))
+    (out / "text" / "index.md").write_text("my own index")
+    before = _tree(out)
+    with pytest.raises(ValueError, match="was not written"):
+        _export(source, out)
+    assert _tree(out) == before
 
 
 def test_mixed_naive_and_aware_created_at(tmp_path):
